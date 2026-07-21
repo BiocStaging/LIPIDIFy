@@ -73,12 +73,6 @@ testthat::test_that("normalize_log2median: same dims", {
   m <- make_matrix(); r <- normalize_log2median(m)
   testthat::expect_equal(dim(r), dim(m))
 })
-testthat::test_that("normalize_vsn (deprecated alias): warns and returns same result", {
-  m <- make_matrix()
-  testthat::expect_warning(r <- normalize_vsn(m), "renamed to 'normalize_log2median'")
-  testthat::expect_equal(r, normalize_log2median(m))
-})
-
 # 6. normalize_median -----------------------------------------------------
 testthat::test_that("normalize_median: same dims", {
   m <- make_matrix(); r <- normalize_median(m)

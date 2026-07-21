@@ -20,6 +20,7 @@
 
 # RStudio files
 .Rproj.user/
+*.Rproj
 
 # produced vignettes
 vignettes/*.html
@@ -51,3 +52,6 @@ rsconnect/
 # Inputs for test
 inputs/
 .DS_Store
+
+# Local Claude Code settings
+.claude/

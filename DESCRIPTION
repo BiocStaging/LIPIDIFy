@@ -48,14 +48,14 @@ Suggests:
     BiocStyle,
     knitr,
     testthat (>= 3.0.0),
-    devtools,
     impute,
-    sva
+    sva,
+    SummarizedExperiment
 VignetteBuilder: knitr
-biocViews: Lipidomics, MassSpectrometry, Normalization, Preprocessing,
-    DifferentialExpression, GeneSetEnrichment, Visualization,
+biocViews: Software, Lipidomics, MassSpectrometry, Normalization,
+    Preprocessing, DifferentialExpression, GeneSetEnrichment, Visualization,
     ShinyApps, MultipleComparison, BatchEffect, QualityControl,
-    DataImport
+    DataImport, Classification
 URL: https://github.com/fayrouzhammal/LIPIDIFy
 BugReports: https://github.com/fayrouzhammal/LIPIDIFy/issues
 Config/testthat/edition: 3

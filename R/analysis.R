@@ -1,10 +1,16 @@
 #' Perform Differential Analysis
 #'
 #' @param data_matrix Normalized data matrix (features as rows, samples as columns)
-#' @param metadata Metadata data frame
+#' @param metadata Metadata data frame. Must contain \code{group_column} and
+#'   have a number of rows matching the samples in \code{data_matrix}.
 #' @param group_column Column name in metadata containing group information
 #' @param contrasts_list List of contrasts to perform
 #' @param method Method to use: "limma" or "edger"
+#' @param design Optional user-supplied design matrix (samples as rows). If
+#'   \code{NULL} (the default), a design matrix of the form \code{~0 + group}
+#'   is built automatically from \code{group_column}. When supplying a custom
+#'   design, \code{contrasts_list} must also be supplied (limma/edgeR-style
+#'   contrast strings referencing the design's column names).
 #' @return List containing results for each contrast
 #' @export
 #' @examples
@@ -15,13 +21,28 @@
 #' )
 #' names(res)
 perform_differential_analysis <- function(data_matrix, metadata, group_column = "Sample Group",
-                                          contrasts_list = NULL, method = "limma") {
+                                          contrasts_list = NULL, method = "limma",
+                                          design = NULL) {
+  if (!method %in% c("limma", "edger")) {
+    stop("`method` must be either \"limma\" or \"edger\", not \"", method, "\".")
+  }
+  if (!is.data.frame(metadata)) {
+    stop("`metadata` must be a data.frame, not ", class(metadata)[1], ".")
+  }
+  if (!group_column %in% colnames(metadata)) {
+    stop(
+      "`group_column` (\"", group_column, "\") was not found in `metadata`. ",
+      "Available columns: ", paste(colnames(metadata), collapse = ", ")
+    )
+  }
+  if (!is.null(design) && is.null(contrasts_list)) {
+    stop("`contrasts_list` must be supplied when a custom `design` matrix is used.")
+  }
+
   if (method == "limma") {
-    return(perform_differential_analysis_limma(data_matrix, metadata, group_column, contrasts_list))
-  } else if (method == "edger") {
-    return(perform_differential_analysis_edger(data_matrix, metadata, group_column, contrasts_list))
+    .perform_differential_analysis_limma(data_matrix, metadata, group_column, contrasts_list, design)
   } else {
-    stop("Method must be either 'limma' or 'edger'")
+    .perform_differential_analysis_edger(data_matrix, metadata, group_column, contrasts_list, design)
   }
 }
 
@@ -31,8 +52,12 @@ perform_differential_analysis <- function(data_matrix, metadata, group_column = 
 #' @param metadata Metadata data frame
 #' @param group_column Column name in metadata containing group information
 #' @param contrasts_list List of contrasts to perform
+#' @param design Optional user-supplied design matrix; see
+#'   \code{\link{perform_differential_analysis}}.
 #' @return List containing LIMMA results for each contrast
-perform_differential_analysis_limma <- function(data_matrix, metadata, group_column = "Sample Group", contrasts_list = NULL) {
+#' @noRd
+.perform_differential_analysis_limma <- function(data_matrix, metadata, group_column = "Sample Group",
+                                                 contrasts_list = NULL, design = NULL) {
   # Convert to matrix if needed
   if (!is.matrix(data_matrix)) {
     data_matrix <- as.matrix(data_matrix)
@@ -42,24 +67,30 @@ perform_differential_analysis_limma <- function(data_matrix, metadata, group_col
   # resolved by sample identity rather than by comparing dimension sizes.
   data_matrix <- .orient_matrix(data_matrix, metadata, want = "features_rows")
 
-  # --- FIX: Store original group labels for UI/display ---
+  # Store original group labels for UI/display, and a make.names()-sanitized
+  # version for use as limma design/contrast identifiers.
   original_groups <- as.character(metadata[[group_column]])
   original_levels <- unique(original_groups)
 
-  # --- FIX: Create sanitized group factor using make.names() ---
   sanitized_groups <- make.names(original_groups)
   sanitized_levels <- make.names(original_levels)
 
-  # Create mapping from original to sanitized
   level_mapping <- sanitized_levels
   names(level_mapping) <- original_levels
   reverse_mapping <- original_levels
   names(reverse_mapping) <- sanitized_levels
 
-  # Create design matrix using sanitized levels
-  groups <- factor(sanitized_groups, levels = sanitized_levels)
-  design <- stats::model.matrix(~ 0 + groups)
-  colnames(design) <- sanitized_levels
+  if (is.null(design)) {
+    groups <- factor(sanitized_groups, levels = sanitized_levels)
+    design <- stats::model.matrix(~ 0 + groups)
+    colnames(design) <- sanitized_levels
+  } else {
+    design <- .validate_design(design, data_matrix)
+    # A user-supplied design is used as-is; contrast strings are expected to
+    # reference its column names directly, so skip level sanitisation/mapping.
+    level_mapping <- NULL
+    reverse_mapping <- NULL
+  }
 
   # Fit linear model
   fit <- limma::lmFit(data_matrix, design)
@@ -67,8 +98,9 @@ perform_differential_analysis_limma <- function(data_matrix, metadata, group_col
   # If no contrasts specified, create default contrasts (using sanitized names)
   if (is.null(contrasts_list)) {
     contrasts_list <- create_default_contrasts(sanitized_levels)
-  } else {
-    # --- FIX: Convert user-provided contrasts to sanitized names ---
+  } else if (!is.null(level_mapping)) {
+    # Convert user-provided contrasts (written in terms of the original group
+    # labels) to the sanitized names used as design column names.
     contrasts_list <- vapply(contrasts_list, function(contrast) {
       for (orig in original_levels) {
         sanitized <- level_mapping[[orig]]
@@ -94,12 +126,15 @@ perform_differential_analysis_limma <- function(data_matrix, metadata, group_col
   original_contrast_names <- colnames(contrast_matrix)
 
   for (i in seq_len(ncol(contrast_matrix))) {
-    # --- FIX: Convert contrast names back to original labels for display ---
+    # Convert sanitized contrast names back to the original group labels for
+    # display, when a default (auto-sanitized) design was used.
     contrast_name <- original_contrast_names[i]
     display_name <- contrast_name
-    for (sanitized in sanitized_levels) {
-      orig <- reverse_mapping[[sanitized]]
-      display_name <- gsub(paste0("\\b", sanitized, "\\b"), orig, display_name)
+    if (!is.null(reverse_mapping)) {
+      for (sanitized in sanitized_levels) {
+        orig <- reverse_mapping[[sanitized]]
+        display_name <- gsub(paste0("\\b", sanitized, "\\b"), orig, display_name)
+      }
     }
 
     results[[display_name]] <- limma::topTable(fit2, coef = i, number = Inf, adjust.method = "fdr")
@@ -122,8 +157,12 @@ perform_differential_analysis_limma <- function(data_matrix, metadata, group_col
 #' @param metadata Metadata data frame
 #' @param group_column Column name in metadata containing group information
 #' @param contrasts_list List of contrasts to perform
+#' @param design Optional user-supplied design matrix; see
+#'   \code{\link{perform_differential_analysis}}.
 #' @return List containing EdgeR results for each contrast
-perform_differential_analysis_edger <- function(data_matrix, metadata, group_column = "Sample Group", contrasts_list = NULL) {
+#' @noRd
+.perform_differential_analysis_edger <- function(data_matrix, metadata, group_column = "Sample Group",
+                                                 contrasts_list = NULL, design = NULL) {
   # Statistical note: edgeR's negative-binomial model was developed for integer
   # count data (RNA-seq). Applying it to continuous mass-spectrometry lipidomics
   # intensities is an approximation. limma is the recommended method for
@@ -149,21 +188,19 @@ perform_differential_analysis_edger <- function(data_matrix, metadata, group_col
   # without rounding to integers, preserving the continuous nature of the data.
   data_matrix[data_matrix < 0] <- 0
 
-  # --- FIX: Store original group labels for UI/display ---
+  # Store original group labels for UI/display, and a make.names()-sanitized
+  # version for use as edgeR design/contrast identifiers.
   original_groups <- as.character(metadata[[group_column]])
   original_levels <- unique(original_groups)
 
-  # --- FIX: Create sanitized group factor using make.names() ---
   sanitized_groups <- make.names(original_groups)
   sanitized_levels <- make.names(original_levels)
 
-  # Create mapping from original to sanitized
   level_mapping <- sanitized_levels
   names(level_mapping) <- original_levels
   reverse_mapping <- original_levels
   names(reverse_mapping) <- sanitized_levels
 
-  # Create groups factor using sanitized levels
   groups <- factor(sanitized_groups, levels = sanitized_levels)
 
   # Create DGEList object
@@ -172,15 +209,23 @@ perform_differential_analysis_edger <- function(data_matrix, metadata, group_col
   # Estimate dispersion
   dge <- edgeR::estimateDisp(dge)
 
-  # Create design matrix using sanitized levels
-  design <- stats::model.matrix(~ 0 + groups)
-  colnames(design) <- sanitized_levels
+  if (is.null(design)) {
+    design <- stats::model.matrix(~ 0 + groups)
+    colnames(design) <- sanitized_levels
+  } else {
+    design <- .validate_design(design, data_matrix)
+    # A user-supplied design is used as-is; contrast strings are expected to
+    # reference its column names directly, so skip level sanitisation/mapping.
+    level_mapping <- NULL
+    reverse_mapping <- NULL
+  }
 
   # If no contrasts specified, create default contrasts (using sanitized names)
   if (is.null(contrasts_list)) {
     contrasts_list <- create_default_contrasts(sanitized_levels)
-  } else {
-    # --- FIX: Convert user-provided contrasts to sanitized names ---
+  } else if (!is.null(level_mapping)) {
+    # Convert user-provided contrasts (written in terms of the original group
+    # labels) to the sanitized names used as design column names.
     contrasts_list <- vapply(contrasts_list, function(contrast) {
       for (orig in original_levels) {
         sanitized <- level_mapping[[orig]]
@@ -205,12 +250,15 @@ perform_differential_analysis_edger <- function(data_matrix, metadata, group_col
   original_contrast_names <- colnames(contrast_matrix)
 
   for (i in seq_len(ncol(contrast_matrix))) {
-    # --- FIX: Convert contrast names back to original labels for display ---
+    # Convert sanitized contrast names back to the original group labels for
+    # display, when a default (auto-sanitized) design was used.
     contrast_name <- original_contrast_names[i]
     display_name <- contrast_name
-    for (sanitized in sanitized_levels) {
-      orig <- reverse_mapping[[sanitized]]
-      display_name <- gsub(paste0("\\b", sanitized, "\\b"), orig, display_name)
+    if (!is.null(reverse_mapping)) {
+      for (sanitized in sanitized_levels) {
+        orig <- reverse_mapping[[sanitized]]
+        display_name <- gsub(paste0("\\b", sanitized, "\\b"), orig, display_name)
+      }
     }
 
     qlf <- edgeR::glmQLFTest(fit, contrast = contrast_matrix[, i])
@@ -255,10 +303,8 @@ create_default_contrasts <- function(group_levels) {
     return(character(0))
   }
 
-  # --- FIX: Ensure levels are valid R names for makeContrasts ---
-  # Note: This function now expects already-sanitized levels from the caller,
-
-  # but we add a safeguard here for direct usage
+  # Callers are expected to pass already-sanitized levels; make.names() here
+  # is a safeguard for direct usage with raw group labels.
   safe_levels <- make.names(group_levels)
 
   contrasts <- c()
@@ -292,6 +338,17 @@ create_default_contrasts <- function(group_levels) {
 perform_enrichment_analysis <- function(results_list, classification_data,
                                         min_set_size = 5, max_set_size = 500,
                                         custom_sets = NULL) {
+  if (!is.list(results_list) || is.data.frame(results_list) || is.null(names(results_list))) {
+    stop("`results_list` must be a named list of differential analysis result ",
+      "data frames (e.g. the `$results` element of `perform_differential_analysis()`).")
+  }
+  if (!is.data.frame(classification_data)) {
+    stop("`classification_data` must be a data.frame, not ", class(classification_data)[1], ".")
+  }
+  if (!"Lipid" %in% colnames(classification_data)) {
+    stop("`classification_data` must contain a \"Lipid\" column.")
+  }
+
   enrichment_results <- list()
 
   for (contrast_name in names(results_list)) {
@@ -320,7 +377,7 @@ perform_enrichment_analysis <- function(results_list, classification_data,
 
     for (class_col in class_columns) {
       if (class_col %in% colnames(merged_data)) {
-        sets <- create_pathway_sets(merged_data, class_col)
+        sets <- .create_pathway_sets(merged_data, class_col)
         if (length(sets) > 0) {
           pathway_sets_list[[class_col]] <- sets
         }
@@ -335,7 +392,7 @@ perform_enrichment_analysis <- function(results_list, classification_data,
     # Run GSEA for each set of pathways
     gsea_results <- list()
     for (set_name in names(pathway_sets_list)) {
-      gsea_res <- run_fgsea_safe(pathway_sets_list[[set_name]], ranked_vector, min_set_size, max_set_size)
+      gsea_res <- .run_fgsea_safe(pathway_sets_list[[set_name]], ranked_vector, min_set_size, max_set_size)
       if (!is.null(gsea_res) && nrow(gsea_res) > 0) {
         gsea_results[[set_name]] <- gsea_res
       }
@@ -352,8 +409,8 @@ perform_enrichment_analysis <- function(results_list, classification_data,
 #' @param merged_data Data frame with lipids and classifications
 #' @param classification_column Column name for classification
 #' @return Named list of pathway sets
-create_pathway_sets <- function(merged_data, classification_column) {
-  # Use base R instead of dplyr pipeline
+#' @noRd
+.create_pathway_sets <- function(merged_data, classification_column) {
   grouped_data <- split(merged_data$Lipid, merged_data[[classification_column]])
 
   # Remove any NULL or empty groups
@@ -369,7 +426,8 @@ create_pathway_sets <- function(merged_data, classification_column) {
 #' @param min_size Minimum set size
 #' @param max_size Maximum set size
 #' @return FGSEA results data frame or NULL if error
-run_fgsea_safe <- function(pathway_sets, ranked_vector, min_size, max_size) {
+#' @noRd
+.run_fgsea_safe <- function(pathway_sets, ranked_vector, min_size, max_size) {
   if (length(pathway_sets) == 0) {
     return(data.frame())
   }
@@ -387,7 +445,7 @@ run_fgsea_safe <- function(pathway_sets, ranked_vector, min_size, max_size) {
       )
 
       # Convert list columns to strings
-      gsea_results <- convert_list_columns_to_strings(gsea_results)
+      gsea_results <- .convert_list_columns_to_strings(gsea_results)
 
       return(gsea_results)
     },
@@ -405,22 +463,12 @@ run_fgsea_safe <- function(pathway_sets, ranked_vector, min_size, max_size) {
   )
 }
 
-#' Run FGSEA (original function kept for compatibility)
-#'
-#' @param pathway_sets Named list of pathway sets
-#' @param ranked_vector Named numeric vector of ranked statistics
-#' @param min_size Minimum set size
-#' @param max_size Maximum set size
-#' @return FGSEA results data frame
-run_fgsea <- function(pathway_sets, ranked_vector, min_size, max_size) {
-  return(run_fgsea_safe(pathway_sets, ranked_vector, min_size, max_size))
-}
-
 #' Convert List Columns to Strings
 #'
 #' @param df Data frame with potential list columns
 #' @return Data frame with list columns converted to strings
-convert_list_columns_to_strings <- function(df) {
+#' @noRd
+.convert_list_columns_to_strings <- function(df) {
   for (col in names(df)) {
     if (is.list(df[[col]])) {
       df[[col]] <- vapply(df[[col]], function(x) {
@@ -444,6 +492,8 @@ convert_list_columns_to_strings <- function(df) {
 #' pca_res <- perform_pca(norm, d$metadata, "Sample Group")
 #' names(pca_res)
 perform_pca <- function(data_matrix, metadata, group_column = "Sample Group") {
+  .validate_metadata(metadata, group_column)
+
   # Orient with samples as rows, resolved by sample identity rather than by
   # assuming features always outnumber samples (which fails when n_samples >
   # n_features, e.g. large cohorts with a focused lipid panel).
@@ -486,7 +536,7 @@ perform_pca <- function(data_matrix, metadata, group_column = "Sample Group") {
   ))
 }
 
-#' Perform PLS-DA Analysis (FIXED VERSION)
+#' Perform PLS-DA Analysis
 #'
 #' @param data_matrix Data matrix (samples as rows)
 #' @param metadata Metadata data frame
@@ -500,11 +550,11 @@ perform_pca <- function(data_matrix, metadata, group_column = "Sample Group") {
 #' res <- perform_plsda(norm, d$metadata, "Sample Group")
 #' names(res)
 perform_plsda <- function(data_matrix, metadata, group_column = "Sample Group", n_comp = 2) {
+  .validate_metadata(metadata, group_column)
+
   tryCatch(
     {
-      # CRITICAL FIX: Ensure it's a matrix, not a data.frame or list
       if (!is.matrix(data_matrix)) {
-        message("Converting data to matrix")
         data_matrix <- as.matrix(data_matrix)
       }
 

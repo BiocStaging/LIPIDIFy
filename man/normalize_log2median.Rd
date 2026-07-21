@@ -2,12 +2,9 @@
 % Please edit documentation in R/utils.R
 \name{normalize_log2median}
 \alias{normalize_log2median}
-\alias{normalize_vsn}
 \title{Log2 Median Centering Normalization}
 \usage{
 normalize_log2median(data)
-
-normalize_vsn(data)
 }
 \arguments{
 \item{data}{Numeric matrix (samples as rows, lipids as columns).}
@@ -28,6 +25,4 @@ VSN is required, use the \pkg{vsn} Bioconductor package directly.
 \examples{
 m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 normalize_log2median(m)
-m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
-normalize_vsn(m)  # deprecated alias
 }

@@ -21,8 +21,8 @@
 #'   \code{checkboxGroupInput}).
 #' @param selected Initially selected choices.
 #' @return A \code{tagList} containing the buttons and the checkbox group.
-#' @keywords internal
-checkbox_group_with_buttons <- function(inputId, label, choices,
+#' @noRd
+.checkbox_group_with_buttons <- function(inputId, label, choices,
                                         selected = NULL) {
   btn_select_id <- paste0(inputId, "_select_all")
   btn_deselect_id <- paste0(inputId, "_deselect_all")
@@ -58,22 +58,15 @@ checkbox_group_with_buttons <- function(inputId, label, choices,
 #'   \code{<inputId>_select_all} and \code{<inputId>_deselect_all}).
 #' @param choices_reactive A reactive expression (or function) that returns the
 #'   current set of choices.
-#' @keywords internal
-register_select_all_observers <- function(session, input, inputId,
+#' @noRd
+.register_select_all_observers <- function(session, input, inputId,
                                           choices_reactive) {
   btn_select_id <- paste0(inputId, "_select_all")
   btn_deselect_id <- paste0(inputId, "_deselect_all")
 
   shiny::observeEvent(input[[btn_select_id]],
     {
-      ch <- choices_reactive()
-      shiny::updateCheckboxGroupInput(session, inputId,
-        selected = if (is.null(names(ch))) {
-          ch
-        } else {
-          ch
-        }
-      )
+      shiny::updateCheckboxGroupInput(session, inputId, selected = choices_reactive())
     },
     ignoreNULL = TRUE
   )
@@ -118,7 +111,7 @@ launch_lipidomics_app <- function(port = NULL) {
         shinydashboard::menuItem("Raw Data Visualization", tabName = "raw_viz", icon = shiny::icon("chart-line")),
         shinydashboard::menuItem("Normalization", tabName = "normalization", icon = shiny::icon("balance-scale")),
         shinydashboard::menuItem("Preprocessing", tabName = "preprocessing", icon = shiny::icon("filter")),
-        shinydashboard::menuItem("Normalized Data Viz", tabName = "norm_viz", icon = shiny::icon("chart-bar")),
+        shinydashboard::menuItem("Normalized Data Visualization", tabName = "norm_viz", icon = shiny::icon("chart-bar")),
         shinydashboard::menuItem("Lipid Expression", tabName = "lipid_expression", icon = shiny::icon("flask")),
         shinydashboard::menuItem("Differential Analysis", tabName = "diff_analysis", icon = shiny::icon("calculator")),
         shinydashboard::menuItem("Results Visualization", tabName = "results_viz", icon = shiny::icon("chart-area")),
@@ -229,7 +222,7 @@ so you can explore every feature of the app before uploading your own files.
 </tr>
 <tr>
   <td><span class="lf-badge">5</span></td>
-  <td><strong>Normalised Data Viz</strong></td>
+  <td><strong>Normalised Data Visualization</strong></td>
   <td>Verify normalisation quality with boxplots, PCA, or PLS-DA. Filter groups,
       add confidence ellipses, show sample name labels on PCA.</td>
   <td>Normalisation applied (step 4)</td>
@@ -571,7 +564,7 @@ Methods are applied left-to-right in the order you select them.
               title = "Upload Lipidomics Data", status = "primary",
               solidHeader = TRUE, width = 6,
               shiny::fileInput("file", "Choose CSV File", accept = ".csv"),
-              checkbox_group_with_buttons(
+              .checkbox_group_with_buttons(
                 "metadata_cols", "Metadata Columns:",
                 choices = c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)"),
                 selected = c("Sample Name", "Sample Group")
@@ -686,7 +679,7 @@ Methods are applied left-to-right in the order you select them.
               ),
               shiny::hr(),
               shiny::h5("Filter and Colour:"),
-              checkbox_group_with_buttons(
+              .checkbox_group_with_buttons(
                 "raw_filter_groups", "Show Groups Only:",
                 choices = NULL, selected = NULL
               ),
@@ -724,19 +717,19 @@ Methods are applied left-to-right in the order you select them.
               title = "Normalization Pipeline Builder", status = "primary",
               solidHeader = TRUE, width = 4,
 
-              # Help button  (FIX #5)
+              # Help button
               shiny::actionLink("info_norm_methods", " Normalization Method Descriptions",
                 icon = shiny::icon("info-circle")
               ),
               shiny::hr(),
               shiny::h4("Pipeline 1:"),
-              checkbox_group_with_buttons(
+              .checkbox_group_with_buttons(
                 "norm_methods_1", "Select Methods (applied in order):",
                 choices = get_normalization_methods(),
                 selected = c("TIC", "Log2")
               ),
               shiny::h4("Pipeline 2 (for comparison):"),
-              checkbox_group_with_buttons(
+              .checkbox_group_with_buttons(
                 "norm_methods_2", "Select Methods (applied in order):",
                 choices = get_normalization_methods(),
                 selected = "PQN"
@@ -941,7 +934,7 @@ Methods are applied left-to-right in the order you select them.
               ),
               shiny::hr(),
               shiny::h5("Filter Samples:"),
-              checkbox_group_with_buttons(
+              .checkbox_group_with_buttons(
                 "norm_filter_groups", "Show Groups:",
                 choices = NULL, selected = NULL
               ),
@@ -955,7 +948,7 @@ Methods are applied left-to-right in the order you select them.
                 shiny::actionLink("info_ellipses", " Ellipse Help",
                   icon = shiny::icon("info-circle")
                 ),
-                checkbox_group_with_buttons(
+                .checkbox_group_with_buttons(
                   "groups_included", "Include Groups:",
                   choices = NULL, selected = NULL
                 ),
@@ -1017,14 +1010,14 @@ Methods are applied left-to-right in the order you select them.
               ),
               shiny::conditionalPanel(
                 condition = "input.expression_selection_mode == 'samples'",
-                checkbox_group_with_buttons(
+                .checkbox_group_with_buttons(
                   "selected_samples", "Select Samples:",
                   choices = NULL, selected = NULL
                 )
               ),
               shiny::conditionalPanel(
                 condition = "input.expression_selection_mode == 'groups'",
-                checkbox_group_with_buttons(
+                .checkbox_group_with_buttons(
                   "selected_expression_groups", "Select Groups:",
                   choices = NULL, selected = NULL
                 )
@@ -1312,7 +1305,7 @@ Methods are applied left-to-right in the order you select them.
               shiny::textInput("report_author", "Author:", value = ""),
               shiny::hr(),
               shiny::h4("Include Sections"),
-              checkbox_group_with_buttons(
+              .checkbox_group_with_buttons(
                 "report_sections", "Sections to include:",
                 choices = c(
                   "Data Summary" = "data_summary",
@@ -1409,19 +1402,19 @@ Methods are applied left-to-right in the order you select them.
     }
 
     # ---- Select All / Deselect All wiring --------------------------------
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "metadata_cols",
       function() c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)")
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "norm_methods_1",
       function() get_normalization_methods()
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "norm_methods_2",
       function() get_normalization_methods()
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "groups_included",
       function() {
         shiny::req(values$raw_data, input$group_column)
@@ -1432,7 +1425,7 @@ Methods are applied left-to-right in the order you select them.
         }
       }
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "selected_samples",
       function() {
         shiny::req(values$raw_data)
@@ -1443,7 +1436,7 @@ Methods are applied left-to-right in the order you select them.
         }
       }
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "selected_expression_groups",
       function() {
         shiny::req(values$raw_data)
@@ -1459,11 +1452,11 @@ Methods are applied left-to-right in the order you select them.
         }
       }
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "report_sections",
       function() c("data_summary", "normalization", "diff_analysis", "enrichment")
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "raw_filter_groups",
       function() {
         shiny::req(values$raw_data)
@@ -1474,7 +1467,7 @@ Methods are applied left-to-right in the order you select them.
         }
       }
     )
-    register_select_all_observers(
+    .register_select_all_observers(
       session, input, "norm_filter_groups",
       function() {
         shiny::req(values$raw_data)
@@ -1578,7 +1571,11 @@ Methods are applied left-to-right in the order you select them.
       } else {
         values$classification
       }
-      if (!is.null(cls)) DT::datatable(cls) else NULL
+      if (!is.null(cls)) {
+        DT::datatable(cls, options = list(scrollX = TRUE, pageLength = 10))
+      } else {
+        NULL
+      }
     })
 
     output$download_classification <- shiny::downloadHandler(
@@ -1607,7 +1604,6 @@ Methods are applied left-to-right in the order you select them.
       )
     })
 
-    # FIX #5 -- info modal for classification
     # Reset to automatic classification
     shiny::observeEvent(input$reset_classification, {
       shiny::req(values$classification)
@@ -1859,7 +1855,7 @@ Methods are applied left-to-right in the order you select them.
       )
     })
 
-    # FIX #5 -- normalization method descriptions modal
+    # Normalization method descriptions modal
     shiny::observeEvent(input$info_norm_methods, {
       descs <- get_normalization_descriptions()
       html_rows <- paste(
@@ -1883,7 +1879,7 @@ Methods are applied left-to-right in the order you select them.
       ))
     })
 
-    # FIX #5 -- ellipse help modal (was missing from server entirely)
+    # Ellipse help modal
     shiny::observeEvent(input$info_ellipses, {
       shiny::showModal(shiny::modalDialog(
         title = "Ellipse Types",
@@ -1953,7 +1949,7 @@ Methods are applied left-to-right in the order you select them.
               metadata = md_col, group_column = group_col
             )
             values$current_norm_plot <- plot
-            add_to_history("Normalized Viz", paste("Norm", input$norm_plot_type), plot)
+            add_to_history("Normalized Data", paste("Norm", input$norm_plot_type), plot)
             output$norm_plot_ui <- shiny::renderUI(
               plotly::plotlyOutput("norm_plot", height = "500px")
             )
@@ -1968,7 +1964,7 @@ Methods are applied left-to-right in the order you select them.
               title        = "Normalised Data Heatmap - Top Variable Lipids"
             )
             values$current_norm_plot <- hm
-            add_to_history("Normalized Viz", "Norm heatmap", hm)
+            add_to_history("Normalized Data", "Norm heatmap", hm)
             output$norm_plot_ui <- shiny::renderUI(
               shiny::plotOutput("norm_heatmap_plot", height = "600px")
             )
@@ -1986,7 +1982,7 @@ Methods are applied left-to-right in the order you select them.
               show_sample_labels = isTRUE(input$show_sample_labels)
             )
             values$current_norm_plot <- plot
-            add_to_history("Normalized Viz", "Norm PCA", plot)
+            add_to_history("Normalized Data", "Norm PCA", plot)
             output$norm_plot_ui <- shiny::renderUI(
               plotly::plotlyOutput("norm_plot", height = "500px")
             )
@@ -2001,7 +1997,7 @@ Methods are applied left-to-right in the order you select them.
               show_sample_labels = isTRUE(input$show_sample_labels)
             )
             values$current_norm_plot <- plot
-            add_to_history("Normalized Viz", "Norm PLS-DA", plot)
+            add_to_history("Normalized Data", "Norm PLS-DA", plot)
             output$norm_plot_ui <- shiny::renderUI(
               plotly::plotlyOutput("norm_plot", height = "500px")
             )
@@ -2124,7 +2120,7 @@ Methods are applied left-to-right in the order you select them.
 
     output$contrast_selection_ui <- shiny::renderUI({
       shiny::req(values$available_contrasts)
-      checkbox_group_with_buttons(
+      .checkbox_group_with_buttons(
         "selected_contrasts", "Choose Contrasts:",
         choices = values$available_contrasts,
         selected = values$available_contrasts
@@ -2715,11 +2711,27 @@ Methods are applied left-to-right in the order you select them.
           metadata     = snap_md,
           numeric_data = corrected_mat
         )
-        shiny::showNotification(
-          paste0("Batch correction applied using ", input$batch_method,
-                 ". Verify the result with a PCA plot."),
-          type = "message", duration = 6
-        )
+
+        # correct_batch_effects() silently falls back from "combat" to "limma"
+        # when the sva package isn't installed (with only a console warning());
+        # reflect the method actually used, not the one requested.
+        method_used <- attr(corrected_mat, "method_used")
+        if (!is.null(method_used) && method_used != input$batch_method) {
+          shiny::showNotification(
+            paste0(
+              "ComBat requires the 'sva' package, which is not installed. ",
+              "Batch correction was applied using limma::removeBatchEffect instead. ",
+              "Install 'sva' (BiocManager::install(\"sva\")) to use ComBat."
+            ),
+            type = "warning", duration = 15
+          )
+        } else {
+          shiny::showNotification(
+            paste0("Batch correction applied using ", input$batch_method,
+                   ". Verify the result with a PCA plot."),
+            type = "message", duration = 6
+          )
+        }
       }, error = function(e) {
         # Roll back snapshot so normalized_data stays valid
         values$normalized_data <- values$pre_batch_data
@@ -2760,7 +2772,7 @@ Methods are applied left-to-right in the order you select them.
           <hr/>
           <p><strong>Important:</strong> always apply batch correction
           <em>after</em> normalisation and verify the result with a PCA
-          plot (Normalised Data Viz tab). Samples should cluster by
+          plot (Normalised Data Visualization tab). Samples should cluster by
           biological group, not by batch, after correction.</p>
         ")
       ))
@@ -2790,7 +2802,7 @@ Methods are applied left-to-right in the order you select them.
       )
     })
 
-    # FIX #10 -- plot history summary shown on report tab
+    # Plot history summary shown on report tab
     output$plot_history_status <- shiny::renderText({
       n <- length(values$plot_history)
       if (n == 0) {
@@ -2806,7 +2818,7 @@ Methods are applied left-to-right in the order you select them.
     # Download handlers
     # ==========================================================================
 
-    # FIX #4 -- descriptive filenames for all downloads
+    # Descriptive filenames for all downloads
 
     output$download_raw_plot <- shiny::downloadHandler(
       filename = function() {
@@ -2946,7 +2958,7 @@ Methods are applied left-to-right in the order you select them.
       }
     )
 
-    # FIX #9 -- Excel export: truncate sheet names to Excel's 31-char limit
+    # Excel export: truncate sheet names to Excel's 31-char limit
     output$download_results <- shiny::downloadHandler(
       filename = function() .dl_name("differential_all", ext = "xlsx"),
       content = function(file) {
@@ -2955,7 +2967,7 @@ Methods are applied left-to-right in the order you select them.
           {
             wb <- openxlsx::createWorkbook()
             for (nm in names(values$diff_results$results)) {
-              sheet_nm <- .truncate_sheet_name(nm) # FIX: max 31 chars
+              sheet_nm <- .truncate_sheet_name(nm) # Excel sheet names are capped at 31 chars
               openxlsx::addWorksheet(wb, sheet_nm)
               res <- values$diff_results$results[[nm]]
               if (!"Lipid" %in% colnames(res)) {
@@ -3146,7 +3158,7 @@ Methods are applied left-to-right in the order you select them.
               }
             }
 
-            rmd <- build_report_rmd_with_plots(
+            rmd <- .build_report_rmd_with_plots(
               title              = input$report_title,
               author             = input$report_author,
               sections           = input$report_sections,
@@ -3159,7 +3171,14 @@ Methods are applied left-to-right in the order you select them.
               extra_plots        = extra_plots
             )
 
-            writeLines(rmd, con = file(temp_rmd, "w", encoding = "UTF-8"))
+            # Open, write, and explicitly close the connection: writeLines()
+            # does not close connections passed in already-open, and without
+            # an explicit close() the write buffer may not be flushed to disk
+            # before rmarkdown::render() reads the file below, truncating it
+            # mid-content.
+            rmd_con <- file(temp_rmd, "w", encoding = "UTF-8")
+            writeLines(rmd, con = rmd_con)
+            close(rmd_con)
 
             fmt <- if (input$report_format == "pdf") {
               rmarkdown::pdf_document(toc = TRUE)
@@ -3343,7 +3362,8 @@ Methods are applied left-to-right in the order you select them.
 #'   session history; each entry has \code{$file}, \code{$section},
 #'   \code{$label}.
 #' @return A single character string containing the complete Rmd document.
-build_report_rmd_with_plots <- function(title, author, sections,
+#' @noRd
+.build_report_rmd_with_plots <- function(title, author, sections,
                                         raw_data, normalized_data,
                                         diff_results, enrichment_results,
                                         output_format = "html",

@@ -102,12 +102,15 @@ generate_example_data <- function() {
 #' loaded_data <- load_lipidomics_data_from_df(data_df)
 #' names(loaded_data)
 load_lipidomics_data_from_df <- function(data_df, metadata_columns = c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)")) {
+  if (!is.data.frame(data_df)) {
+    stop("`data_df` must be a data.frame, not ", class(data_df)[1], ".")
+  }
+
   # Filter out PBQC samples if present
   if ("Sample Group" %in% colnames(data_df)) {
     data_df <- data_df[!grepl("PBQC", data_df$`Sample Group`, ignore.case = TRUE), ]
   }
 
-  # --- FIX: Robust metadata/numeric separation ---
   # Start with user-specified metadata columns
   metadata_cols <- names(data_df)[names(data_df) %in% metadata_columns]
 
@@ -135,12 +138,12 @@ load_lipidomics_data_from_df <- function(data_df, metadata_columns = c("Sample N
   metadata <- data_df[, names(data_df) %in% all_metadata_cols, drop = FALSE]
   numeric_data <- data_df[, numeric_cols, drop = FALSE]
 
-  # --- FIX: Explicitly coerce each numeric column to numeric ---
+  # Explicitly coerce each numeric column to numeric
   for (col in names(numeric_data)) {
     numeric_data[[col]] <- as.numeric(numeric_data[[col]])
   }
 
-  # --- FIX: Drop columns that are all NA after coercion ---
+  # Drop columns that are all NA after coercion
   all_na_cols <- vapply(
     seq_len(ncol(numeric_data)),
     function(j) all(is.na(numeric_data[, j])), logical(1)
@@ -149,7 +152,7 @@ load_lipidomics_data_from_df <- function(data_df, metadata_columns = c("Sample N
     numeric_data <- numeric_data[, !all_na_cols, drop = FALSE]
   }
 
-  # --- FIX: Convert to matrix only after ensuring all columns are numeric ---
+  # Convert to matrix only after ensuring all columns are numeric
   numeric_data <- as.matrix(numeric_data)
   storage.mode(numeric_data) <- "numeric"
 
@@ -172,19 +175,4 @@ load_lipidomics_data_from_df <- function(data_df, metadata_columns = c("Sample N
     metadata = metadata,
     numeric_data = numeric_data
   ))
-}
-
-#' Example lipidomics dataset (lazy generator)
-#'
-#' @description
-#' Convenience helper that generates a small synthetic lipidomics dataset
-#' for examples and vignettes.
-#'
-#' @return A data.frame as returned by \code{generate_example_data()}.
-#' @export
-#' @examples
-#' df <- example_lipidomics_data()
-#' nrow(df)
-example_lipidomics_data <- function() {
-  generate_example_data()
 }

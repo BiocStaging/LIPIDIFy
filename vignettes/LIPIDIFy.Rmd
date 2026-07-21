@@ -1,0 +1,606 @@
+---
+title: "LIPIDIFy"
+author: "Fayrouz Hammal"
+date: "`r Sys.Date()`"
+package: LIPIDIFy
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+vignette: >
+  %\VignetteIndexEntry{LIPIDIFy}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 9,
+  fig.height = 5,
+  fig.align = "center",
+  warning   = FALSE,
+  message   = FALSE
+)
+```
+
+# Introduction
+
+**LIPIDIFy** provides an end-to-end toolkit for mass-spectrometry lipidomics
+data analysis: missing-value imputation, batch-effect correction, multiple
+normalization strategies, differential abundance analysis (limma and edgeR),
+gene-set enrichment analysis, and extensive visualization. Lipid names are
+automatically classified by class, subclass, and fatty-acid saturation, and
+the package supports user-defined classification schemes and enrichment sets
+for lipidomes that don't fit a fixed ontology.
+
+## Why LIPIDIFy?
+
+Several excellent packages already support lipidomics analysis in
+Bioconductor, most notably
+[lipidr](https://bioconductor.org/packages/lipidr), which centres on a
+`SummarizedExperiment`-derived class for annotation, normalization, and
+class-level statistical testing. LIPIDIFy is a complementary tool rather than
+a replacement, aimed at two audiences at once:
+
+- **Bench biologists**, via `launch_lipidomics_app()`, an interactive Shiny
+  dashboard that requires no R programming: upload a CSV, click through
+  normalization/QC/differential/enrichment steps, and export a report.
+- **Bioinformaticians**, via the same underlying functions used
+  programmatically, for reproducible, scriptable analyses.
+
+Relative to existing workflows, LIPIDIFy additionally emphasises:
+
+- **Flexible classification and enrichment.** Lipid classes are inferred
+  automatically from standard nomenclature, but users can supply their own
+  classification table (any hierarchy, any number of columns) and custom
+  enrichment sets, rather than being tied to one fixed ontology.
+- **Side-by-side pipeline comparison.** `create_pipeline_plot()` lets users
+  visually compare two full normalization pipelines (e.g. TIC+Log2 vs.
+  PQN+Log2) before committing to one, which is otherwise a manual, repetitive
+  step.
+- **Imputation and batch correction as first-class steps**, with multiple
+  interchangeable methods (`impute_missing_values()`,
+  `correct_batch_effects()`) integrated into the same workflow as
+  normalization and differential analysis, rather than requiring separate
+  tooling.
+
+## Interoperability with the Bioconductor ecosystem
+
+Internally, LIPIDIFy represents data as plain matrices and data frames
+(`list(data, metadata, numeric_data)`) rather than a custom S4 class, which
+keeps the API approachable for users who are not already familiar with
+Bioconductor's class system. This representation converts trivially to a
+`SummarizedExperiment`, so results can be handed off to other Bioconductor
+tools (or a `lipidr` `LipidomicsExperiment`, which extends
+`SummarizedExperiment`) for further analysis. See the
+[Interoperability](#interoperability-with-summarizedexperiment) section near
+the end of this vignette for a worked example.
+
+## Installation
+
+```{r installation, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("LIPIDIFy")
+```
+
+```{r load_package}
+library(LIPIDIFy)
+```
+
+The same workflow below is available without any coding via the Shiny
+application:
+
+```{r launch-app, eval=FALSE}
+launch_lipidomics_app()
+```
+
+***
+
+# Example Data
+
+This vignette uses a real, publicly available lipidomics dataset rather than
+simulated data: **Metabolomics Workbench study
+[ST001359](https://www.metabolomicsworkbench.org/data/DRCCMetadata.php?StudyID=ST001359)**,
+"Monophasic lipidomics extraction in cancer cell lines" (Rodriguez Blanco G.,
+Beatson Institute for Cancer Research; Project PR000929, Analysis AN002263;
+licensed CC BY 4.0). It profiles HepG2 hepatocellular carcinoma cells by
+LC-MS (reversed phase, positive ion mode) under two conditions: untreated
+controls and cells treated with an SDC (syndecan) inhibitor, 3 replicates
+each. The processed data matrix is bundled with the package at
+`inst/extdata/ST001359_lipidomics.csv`; see
+`data-raw/prepare_ST001359_lipidomics.R` for exactly how it was derived from
+the public API.
+
+```{r load-data}
+file_path <- system.file("extdata", "ST001359_lipidomics.csv", package = "LIPIDIFy")
+
+raw_data <- load_lipidomics_data(
+  file_path,
+  metadata_columns = c("Sample Name", "Sample Group")
+)
+
+cat("Samples  :", nrow(raw_data$numeric_data), "\n")
+cat("Lipids   :", ncol(raw_data$numeric_data), "\n")
+cat("Groups   :", paste(unique(raw_data$metadata$`Sample Group`), collapse = ", "), "\n")
+```
+
+`load_lipidomics_data()` returns a **named list** with three elements:
+
+- `$numeric_data` - matrix of lipid abundances (samples x lipids)
+- `$metadata` - data frame of sample metadata
+- `$data` - the original full data frame
+
+```{r peek-data}
+head(raw_data$metadata, 6)
+raw_data$numeric_data[, 1:4]
+```
+
+Values are the study's own "peak area, normalized" units, which the
+submitters already log2-scaled; we use them unchanged (not re-normalized or
+back-transformed) to preserve fidelity to the deposited data. This matters
+below: a second application of Log2 or TIC normalization would not be
+meaningful on data that is already log-scaled and normalized, so we apply
+only light median-centring further on.
+
+If you would rather experiment with a larger, fully synthetic dataset (20
+samples, 4 groups, un-transformed intensities), `generate_example_data()`
+creates one on the fly -- it is used in this vignette only for the
+normalization-pipeline comparison in the next section, where raw-scale
+intensities make the effect of each method clearer.
+
+***
+
+# Lipid Classification
+
+`classify_lipids()` parses lipid names and assigns three classification
+levels:
+
+- **LipidGroup** - broad category (e.g., Glycerophospholipids, Sphingolipids)
+- **LipidType** - specific subclass (e.g., Phosphatidylcholine)
+- **Saturation** - SFA (0 double bonds), MUFA (1), PUFA (> 1)
+
+```{r classify}
+lipid_names    <- colnames(raw_data$numeric_data)
+classification <- classify_lipids(lipid_names)
+
+head(classification, 8)
+```
+
+```{r classify-summary}
+cat("Lipid groups:\n")
+print(sort(table(classification$LipidGroup), decreasing = TRUE))
+
+cat("\nFatty-acid saturation:\n")
+print(table(classification$Saturation))
+```
+
+Real-world lipid identifiers are rarely as tidy as textbook nomenclature.
+Here, roughly a quarter of features (e.g. `BMP`, `CL`, acylcarnitines, ether
+lipids reported as `Plasmanyl-`/`Plasmenyl-`) fall outside the built-in
+pattern set and are labelled `"Other/Unclassified"`. Rather than guessing,
+you can supply your own classification table with `load_custom_classification()`
+(any number of columns, any hierarchy) to cover exactly the lipid space of
+your dataset.
+
+***
+
+# Raw Data Visualization
+
+Examining distributions **before normalization** helps detect outlier
+samples, batch effects, and scaling differences.
+
+```{r raw-boxplot, fig.cap="Per-sample intensity distributions before normalization. Boxes are coloured by group."}
+raw_list <- list(numeric_data = raw_data$numeric_data, metadata = raw_data$metadata)
+
+visualize_raw_data_improved(
+  raw_list,
+  plot_type    = "boxplot",
+  view_mode    = "sample",
+  metadata     = raw_data$metadata,
+  group_column = "Sample Group"
+)
+```
+
+```{r raw-density, fig.cap="Intensity density curves before normalization, one curve per sample."}
+visualize_raw_data_improved(
+  raw_list,
+  plot_type    = "density",
+  view_mode    = "sample",
+  metadata     = raw_data$metadata,
+  group_column = "Sample Group"
+)
+```
+
+***
+
+# Normalization
+
+## What methods are available?
+
+```{r norm-methods}
+get_normalization_methods()
+```
+
+## Comparing pipelines side-by-side
+
+It is good practice to compare normalization strategies visually before
+committing to one. This is most informative on raw-scale intensities, so we
+illustrate it here with the built-in synthetic dataset, comparing TIC+Log2
+(a common starting point) against PQN+Log2 (more robust when large
+fold-changes are expected):
+
+```{r norm-compare, fig.cap="Side-by-side comparison of two normalization pipelines applied to the same raw, synthetic data.", fig.height=9}
+synthetic_df  <- generate_example_data()
+synthetic_obj <- load_lipidomics_data_from_df(synthetic_df)
+
+pipeline1 <- apply_normalizations(synthetic_obj$numeric_data, c("TIC", "Log2"))
+pipeline2 <- apply_normalizations(synthetic_obj$numeric_data, c("PQN", "Log2"))
+
+p1 <- create_pipeline_plot(pipeline1,
+                            title     = "Pipeline 1: TIC + Log2",
+                            metadata  = synthetic_obj$metadata,
+                            plot_type = "boxplot")
+
+p2 <- create_pipeline_plot(pipeline2,
+                            title     = "Pipeline 2: PQN + Log2",
+                            metadata  = synthetic_obj$metadata,
+                            plot_type = "boxplot")
+
+gridExtra::grid.arrange(p1, p2, ncol = 1)
+```
+
+## Applying normalization to the real dataset
+
+The ST001359 data is already log2-scaled and normalized by the original
+submitters, so we apply only median-centring here rather than a second
+TIC/PQN/Log2 pass, which would not be meaningful on top of an existing
+log-scale normalization:
+
+```{r normalize}
+norm_data <- apply_normalizations(raw_data$numeric_data, methods = "Median")
+
+dim(norm_data)  # samples x lipids - same dimensions as raw data
+```
+
+```{r norm-boxplot, fig.cap="Per-sample distributions after median-centring."}
+norm_list <- list(numeric_data = norm_data, metadata = raw_data$metadata)
+
+visualize_raw_data_improved(
+  norm_list,
+  plot_type    = "boxplot",
+  view_mode    = "sample",
+  metadata     = raw_data$metadata,
+  group_column = "Sample Group"
+)
+```
+
+***
+
+# Missing Value Imputation
+
+Missing values in lipidomics data typically arise when a lipid's signal
+falls below the instrument's limit of detection. LIPIDIFy provides six
+imputation strategies via `impute_missing_values()`. Imputing **after**
+normalisation ensures that imputed values sit on the same scale as observed
+values.
+
+```{r impute}
+cat("Missing values in this dataset:", sum(is.na(norm_data)), "\n")
+cat("Imputation methods available:\n")
+print(get_imputation_methods())
+```
+
+```{r impute-apply}
+# For demonstration: introduce 5% artificial missing values
+demo_norm <- norm_data
+set.seed(42)
+demo_norm[sample(length(demo_norm), size = round(0.05 * length(demo_norm)))] <- NA
+cat("Missingness introduced:", sum(is.na(demo_norm)),
+    sprintf("(%.1f%%)\n", 100 * mean(is.na(demo_norm))))
+
+imputed_norm <- impute_missing_values(demo_norm, method = "half_min")
+cat("Missing after imputation:", sum(is.na(imputed_norm)), "\n")
+```
+
+**Choosing a method:**
+
+| Method | Best for |
+|--------|----------|
+| `half_min` | Most lipidomics data; models the LOD on normalised scale |
+| `knn` | Data missing at random (MAR); requires `impute` Bioconductor package |
+| `zero` | Only when absence of signal truly means zero |
+| `mean` / `median` | Small proportions of missing values |
+
+For the remainder of this vignette we use the complete normalised data
+without artificial missingness.
+
+***
+
+# Batch Effect Correction
+
+When samples are processed across multiple runs, instruments, or operators,
+technical batch effects can obscure biological differences.
+`correct_batch_effects()` removes these effects while preserving biological
+signal, and should be applied after normalisation and imputation, then
+verified with PCA. The ST001359 dataset has no recorded batch structure, so
+this step is illustrated but not evaluated here.
+
+Two methods are available:
+
+| Method | When to use |
+|--------|------------|
+| `"limma"` | Default; fast and reliable for balanced designs |
+| `"combat"` | Better for large or unbalanced batch effects; requires `sva` package |
+
+```{r batch-correction, eval=FALSE}
+# Simulate batch labels (real data would have this in the metadata file)
+raw_data$metadata$Batch <- rep(c("Run1", "Run2"), each = 3)
+
+norm_corrected <- correct_batch_effects(
+  data_matrix  = norm_data,
+  metadata     = raw_data$metadata,
+  batch_column = "Batch",
+  group_column = "Sample Group",
+  method       = "limma"
+)
+
+# Verify: PCA should now show clustering by biology, not by batch
+pca_corrected <- perform_pca(norm_corrected, raw_data$metadata, "Sample Group")
+create_pca_plot_with_ellipses(
+  pca_data           = pca_corrected$pca_data,
+  variance_explained = pca_corrected$variance_explained,
+  ellipse_type       = "confidence",
+  title              = "PCA after Batch Correction"
+)
+```
+
+***
+
+# Quality Control with PCA
+
+PCA on normalized data should show samples clustering by biological group
+rather than by technical artefact.
+
+```{r pca, fig.cap="PCA of the normalized ST001359 data."}
+pca_res <- perform_pca(norm_data, raw_data$metadata, "Sample Group")
+
+create_pca_plot_with_ellipses(
+  pca_data           = pca_res$pca_data,
+  variance_explained = pca_res$variance_explained,
+  ellipse_type       = "none",
+  show_sample_labels = TRUE,
+  title              = "PCA - Control vs. SDC Inhibition"
+)
+```
+
+With only 3 replicates per group, confidence ellipses are not meaningful
+here (`ellipse_type = "none"`); with larger sample sizes,
+`ellipse_type = "confidence"` draws 95% confidence regions per group.
+
+***
+
+# Differential Analysis
+
+## Automatic pairwise contrasts
+
+`create_default_contrasts()` generates all pairwise comparisons from the
+groups present in your data. You can also specify contrasts manually, or
+supply your own `design` matrix (see `?perform_differential_analysis`) when
+the default `~0 + group` design doesn't fit your experiment (e.g. paired
+samples, additional covariates).
+
+```{r contrasts}
+groups    <- unique(raw_data$metadata$`Sample Group`)
+contrasts <- create_default_contrasts(groups)
+print(contrasts)
+```
+
+## Choosing a method: limma or edgeR?
+
+```{r diff-analysis}
+diff_res <- perform_differential_analysis(
+  data_matrix    = norm_data,
+  metadata       = raw_data$metadata,
+  group_column   = "Sample Group",
+  contrasts_list = contrasts,
+  method         = "limma"
+)
+```
+
+**limma is the recommended default** for mass-spectrometry lipidomics: it
+models continuous, approximately log-normal intensities directly.
+
+**edgeR is provided only as an exploratory alternative.** edgeR's
+negative-binomial model was designed for integer RNA-seq count data;
+applying it to continuous MS intensities is an approximation, and
+`perform_differential_analysis(..., method = "edger")` emits a warning to
+that effect every time it is called. Consider edgeR only if you specifically
+want to cross-check limma's results against a second modelling assumption,
+or if you are integrating lipidomics into a broader pipeline that already
+standardises on edgeR for consistency -- not as a first choice.
+
+```{r diff-summary}
+cat(sprintf("%-20s  %5s  %5s  %4s  %5s\n", "Contrast", "Total", "Sig", "Up", "Down"))
+cat(strrep("-", 48), "\n")
+
+for (nm in names(diff_res$results)) {
+  res    <- diff_res$results[[nm]]
+  n_sig  <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
+  n_up   <- sum(res$adj.P.Val < 0.05 & res$logFC > 0, na.rm = TRUE)
+  n_down <- sum(res$adj.P.Val < 0.05 & res$logFC < 0, na.rm = TRUE)
+  cat(sprintf("%-20s  %5d  %5d  %4d  %5d\n", nm, nrow(res), n_sig, n_up, n_down))
+}
+```
+
+```{r top-results}
+first_contrast <- names(diff_res$results)[1]
+res_df <- diff_res$results[[first_contrast]]
+res_df <- res_df[order(res_df$adj.P.Val), ]
+
+top10 <- utils::head(res_df[, c("logFC", "AveExpr", "adj.P.Val")], 10)
+top10$logFC     <- round(top10$logFC, 3)
+top10$AveExpr   <- round(top10$AveExpr, 2)
+top10$adj.P.Val <- signif(top10$adj.P.Val, 3)
+
+cat("Top 10 features in:", first_contrast, "\n\n")
+print(top10)
+```
+
+***
+
+# Results Visualization
+
+## Volcano plot
+
+Significant lipids (|logFC| > 1 and adj.P.Val < 0.05) are coloured by lipid
+class. The top 10 most significant are labelled.
+
+```{r volcano, fig.cap="Volcano plot coloured by lipid class."}
+create_volcano_plot_labeled(
+  results             = diff_res$results[[first_contrast]],
+  title               = paste("Volcano:", first_contrast),
+  logfc_threshold     = 1,
+  pval_threshold      = 0.05,
+  top_labels          = 10,
+  classification_data = classification,
+  color_by            = "LipidGroup"
+)
+```
+
+## Heatmap of significant features
+
+```{r heatmap, fig.cap="Heatmap of significant lipids. Rows (lipids) and columns (samples) are hierarchically clustered. Colour scale is z-scored per lipid.", fig.height=7}
+sig_lipids <- rownames(res_df)[
+  !is.na(res_df$adj.P.Val) &
+  res_df$adj.P.Val < 0.05 &
+  abs(res_df$logFC) > 1
+]
+
+if (length(sig_lipids) >= 5) {
+  top_n  <- min(30, length(sig_lipids))
+  avail  <- intersect(sig_lipids[seq_len(top_n)], colnames(norm_data))
+  hm_mat <- t(norm_data[, avail, drop = FALSE])
+
+  create_heatmap_robust(
+    data_matrix  = hm_mat,
+    metadata     = raw_data$metadata,
+    group_column = "Sample Group",
+    top_n        = top_n,
+    title        = paste("Significant lipids:", first_contrast)
+  )
+} else {
+  message("Fewer than 5 significant lipids at these thresholds.")
+}
+```
+
+***
+
+# Lipid Expression
+
+`create_lipid_expression_barplot()` shows per-sample abundance of individual
+lipids, sorted by group. It returns a single ggplot object when one lipid is
+selected, or a named list of ggplot objects when multiple lipids are
+selected.
+
+```{r lipid-expression, fig.cap="Per-sample abundance of the 3 most significant lipids."}
+top_lipids <- utils::head(rownames(res_df)[!is.na(res_df$adj.P.Val)], 3)
+cat("Selected lipids:\n")
+print(top_lipids)
+
+expr_result <- create_lipid_expression_barplot(
+  data_matrix     = norm_data,
+  metadata        = raw_data$metadata,
+  selected_lipids = top_lipids,
+  group_column    = "Sample Group",
+  data_type       = "normalized"
+)
+
+if (inherits(expr_result, "ggplot")) {
+  print(expr_result)
+} else {
+  for (lipid_plot in expr_result) print(lipid_plot)
+}
+```
+
+***
+
+# Enrichment Analysis
+
+Enrichment analysis tests whether lipids in a particular class are
+collectively more increased or decreased than expected by chance, using the
+fgsea algorithm.
+
+```{r enrichment}
+enrich_res <- perform_enrichment_analysis(
+  results_list        = diff_res$results,
+  classification_data = classification,
+  min_set_size        = 3,
+  max_set_size        = 500
+)
+
+cat("Categories per contrast:", paste(names(enrich_res[[1]]), collapse = ", "), "\n")
+```
+
+```{r enrichment-table}
+grp_enrich <- enrich_res[[first_contrast]][["LipidGroup"]]
+
+if (!is.null(grp_enrich) && nrow(grp_enrich) > 0) {
+  grp_enrich <- grp_enrich[order(grp_enrich$pval), ]
+  out        <- utils::head(grp_enrich[, c("pathway", "NES", "pval", "padj", "size")], 5)
+  out$NES    <- round(out$NES, 3)
+  out$pval   <- signif(out$pval, 3)
+  out$padj   <- signif(out$padj, 3)
+  print(out, row.names = FALSE)
+} else {
+  cat("No enrichment results available.\n")
+}
+```
+
+```{r enrichment-plot, fig.cap="Enrichment dot plot for the first contrast. Dot size reflects set size; colour reflects statistical significance."}
+if (!is.null(grp_enrich) && nrow(grp_enrich) > 0) {
+  create_enrichment_dotplot(
+    enrichment_data = grp_enrich,
+    title           = paste("Lipid Group Enrichment:", first_contrast),
+    max_pathways    = 10
+  )
+}
+```
+
+Custom, user-defined pathway sets (not tied to `LipidGroup`/`LipidType`) can
+be supplied via `load_custom_enrichment_sets()` and passed as `custom_sets`.
+
+***
+
+# Interoperability with SummarizedExperiment
+
+LIPIDIFy's list-of-matrices representation converts directly to a
+`SummarizedExperiment`, for interoperability with the rest of the
+Bioconductor ecosystem (or with `lipidr`, whose `LipidomicsExperiment` class
+extends `SummarizedExperiment`):
+
+```{r summarized-experiment}
+if (requireNamespace("SummarizedExperiment", quietly = TRUE)) {
+  se <- SummarizedExperiment::SummarizedExperiment(
+    assays  = list(normalized = t(norm_data)),
+    colData = raw_data$metadata
+  )
+  print(se)
+}
+```
+
+From here, `se` can be passed to any Bioconductor function expecting a
+`SummarizedExperiment`.
+
+***
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```

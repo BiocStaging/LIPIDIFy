@@ -14,6 +14,10 @@
 #' p <- visualize_raw_data(dl, "boxplot")
 #' print(p)
 visualize_raw_data <- function(data_list, plot_type = "boxplot") {
+  if (!is.list(data_list) || is.null(data_list$numeric_data)) {
+    stop("`data_list` must be a list containing a `numeric_data` element ",
+      "(e.g. the output of load_lipidomics_data() or load_lipidomics_data_from_df()).")
+  }
   numeric_data <- data_list$numeric_data
   if (is.matrix(numeric_data)) {
     numeric_data <- as.data.frame(numeric_data, check.names = FALSE)
@@ -320,6 +324,11 @@ create_pipeline_plot <- function(data_matrix, title = "Normalization Pipeline",
                                  view_mode = "sample", top_n = NULL) {
   plot_type <- match.arg(plot_type, c("boxplot", "violin", "density"))
   view_mode <- match.arg(view_mode, c("sample", "lipid"))
+  .validate_numeric_matrix(data_matrix, "data_matrix")
+  # group_column is optional here by design: if absent from metadata, the
+  # plot is simply drawn without group colouring (group_col_present below),
+  # so only the data.frame-ness of metadata itself is validated.
+  if (!is.null(metadata)) .validate_metadata(metadata)
 
   df <- as.data.frame(data_matrix, check.names = FALSE)
 
@@ -442,9 +451,7 @@ create_heatmap_robust <- function(data_matrix, metadata,
       if (is.null(data_matrix) || nrow(data_matrix) == 0 || ncol(data_matrix) == 0) {
         stop("Data matrix is empty or NULL.")
       }
-      if (is.null(metadata) || nrow(metadata) == 0) {
-        stop("Metadata is empty or NULL.")
-      }
+      .validate_metadata(metadata)
 
       # Orient with features as rows / samples as columns, resolved by sample
       # identity rather than by comparing dimension sizes.
@@ -524,6 +531,7 @@ create_heatmap_robust <- function(data_matrix, metadata,
 #' aligned <- fix_sample_alignment(t(d$numeric_data), d$metadata)
 #' names(aligned)
 fix_sample_alignment <- function(data_matrix, metadata) {
+  .validate_metadata(metadata)
   data_samples <- colnames(data_matrix)
 
   metadata_samples <- if ("Sample Name" %in% colnames(metadata)) {
@@ -589,6 +597,12 @@ create_volcano_plot_labeled <- function(results,
                                         classification_data = NULL,
                                         color_by = NULL) {
   if (!is.data.frame(results)) results <- as.data.frame(results)
+  if (!all(c("logFC", "adj.P.Val") %in% colnames(results))) {
+    stop(
+      "`results` must contain \"logFC\" and \"adj.P.Val\" columns ",
+      "(e.g. one contrast's data frame from perform_differential_analysis()$results)."
+    )
+  }
   if (!"Lipid" %in% colnames(results)) results$Lipid <- rownames(results)
 
   results$Significance <- "Not Significant"
@@ -763,6 +777,10 @@ create_lipid_expression_barplot <- function(data_matrix,
                                             selected_groups = NULL,
                                             group_column = "Sample Group",
                                             data_type = "normalized") {
+  .validate_metadata(metadata)
+  if (missing(selected_lipids) || length(selected_lipids) == 0) {
+    stop("`selected_lipids` must be a non-empty character vector of lipid names.")
+  }
   if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
   # Orient with samples as rows, resolved by sample identity rather than by
   # comparing dimension sizes (which fails when n_samples > n_features).
@@ -897,6 +915,12 @@ create_pca_plot_with_ellipses <- function(pca_data,
                                           confidence_level = 0.95,
                                           title = "PCA Analysis",
                                           show_sample_labels = FALSE) {
+  if (!is.data.frame(pca_data) || !all(c("PC1", "PC2", "Group") %in% colnames(pca_data))) {
+    stop(
+      "`pca_data` must be a data.frame with \"PC1\", \"PC2\", and \"Group\" ",
+      "columns (e.g. the `$pca_data` element of perform_pca())."
+    )
+  }
   p <- ggplot2::ggplot(
     pca_data,
     ggplot2::aes(x = PC1, y = PC2, color = Group)
@@ -999,6 +1023,12 @@ create_plsda_plot_with_ellipses <- function(plsda_data,
                                             confidence_level = 0.95,
                                             title = "PLS-DA Analysis",
                                             show_sample_labels = FALSE) {
+  if (!is.data.frame(plsda_data) || !all(c("Comp1", "Comp2", "Group") %in% colnames(plsda_data))) {
+    stop(
+      "`plsda_data` must be a data.frame with \"Comp1\", \"Comp2\", and \"Group\" ",
+      "columns (e.g. the `$scores_data` element of perform_plsda())."
+    )
+  }
   p <- ggplot2::ggplot(
     plsda_data,
     ggplot2::aes(x = Comp1, y = Comp2, color = Group)
@@ -1077,6 +1107,9 @@ create_plsda_plot_with_ellipses <- function(plsda_data,
 create_enrichment_dotplot <- function(enrichment_data,
                                       title = "Enrichment Analysis",
                                       max_pathways = 15) {
+  if (!is.data.frame(enrichment_data)) {
+    stop("`enrichment_data` must be a data.frame, not ", class(enrichment_data)[1], ".")
+  }
   if (nrow(enrichment_data) == 0) {
     return(ggplot2::ggplot() +
       ggplot2::annotate("text",
@@ -1138,6 +1171,9 @@ create_enrichment_dotplot <- function(enrichment_data,
 create_enrichment_barplot <- function(enrichment_data,
                                       title = "Enrichment Analysis",
                                       max_pathways = 15) {
+  if (!is.data.frame(enrichment_data)) {
+    stop("`enrichment_data` must be a data.frame, not ", class(enrichment_data)[1], ".")
+  }
   if (nrow(enrichment_data) == 0) {
     return(ggplot2::ggplot() +
       ggplot2::annotate("text",

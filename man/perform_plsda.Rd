@@ -2,7 +2,7 @@
 % Please edit documentation in R/analysis.R
 \name{perform_plsda}
 \alias{perform_plsda}
-\title{Perform PLS-DA Analysis (FIXED VERSION)}
+\title{Perform PLS-DA Analysis}
 \usage{
 perform_plsda(data_matrix, metadata, group_column = "Sample Group", n_comp = 2)
 }
@@ -19,7 +19,7 @@ perform_plsda(data_matrix, metadata, group_column = "Sample Group", n_comp = 2)
 List containing PLS-DA results and plot
 }
 \description{
-Perform PLS-DA Analysis (FIXED VERSION)
+Perform PLS-DA Analysis
 }
 \examples{
 d <- load_lipidomics_data_from_df(generate_example_data())

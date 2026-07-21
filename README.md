@@ -33,8 +33,20 @@ The package provides an end-to-end pipeline from raw lipidomics data to biologic
 
 ## Installation
 
+### Bioconductor (release)
+
 ```r
-remotes::install_github("fayrouzhammal/LIPIDIFy")
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("LIPIDIFy")
+library(LIPIDIFy)
+```
+
+### Development version
+
+```r
+BiocManager::install("fayrouzhammal/LIPIDIFy")
 library(LIPIDIFy)
 ```
 
@@ -93,7 +105,7 @@ get_normalization_methods()
 # [7] "Log2"     "Log10"    "Sqrt"     "None"
 
 # Apply a pipeline (methods chained in order)
-normalized <- normalize_lipidomics_data(
+normalized <- apply_normalizations(
   data$numeric_data,
   methods = c("TIC", "Log2")
 )
@@ -254,7 +266,7 @@ Methods are applied in the order selected. Recommended pipelines: **TIC + Log2**
 ```r
 # Function-level help
 ?launch_lipidomics_app
-?normalize_lipidomics_data
+?apply_normalizations
 ?perform_differential_analysis
 
 # Full vignette

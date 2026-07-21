@@ -5,7 +5,7 @@ bibentry(
   title    = "LIPIDIFy: An Interactive R Package for End-to-End Lipidomics Analysis",
   author   = person("Fayrouz", "Hammal", role = c("aut", "cre")),
   year     = format(Sys.Date(), "%Y"),
-  note     = paste0("R package version 0.99.0"),
-  url      = "https://github.com/hammalfayrouz/LIPIDIFy",
+  note     = paste0("R package version ", meta$Version),
+  url      = "https://github.com/fayrouzhammal/LIPIDIFy",
   key      = "LIPIDIFy"
 )

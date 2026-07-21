@@ -9,19 +9,27 @@ perform_differential_analysis(
   metadata,
   group_column = "Sample Group",
   contrasts_list = NULL,
-  method = "limma"
+  method = "limma",
+  design = NULL
 )
 }
 \arguments{
 \item{data_matrix}{Normalized data matrix (features as rows, samples as columns)}
 
-\item{metadata}{Metadata data frame}
+\item{metadata}{Metadata data frame. Must contain \code{group_column} and
+have a number of rows matching the samples in \code{data_matrix}.}
 
 \item{group_column}{Column name in metadata containing group information}
 
 \item{contrasts_list}{List of contrasts to perform}
 
 \item{method}{Method to use: "limma" or "edger"}
+
+\item{design}{Optional user-supplied design matrix (samples as rows). If
+\code{NULL} (the default), a design matrix of the form \code{~0 + group}
+is built automatically from \code{group_column}. When supplying a custom
+design, \code{contrasts_list} must also be supplied (limma/edgeR-style
+contrast strings referencing the design's column names).}
 }
 \value{
 List containing results for each contrast

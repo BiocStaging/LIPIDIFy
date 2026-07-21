@@ -26,6 +26,13 @@ load_lipidomics_data <- function(file_path,
                                    "Sample Name", "Sample Group",
                                    "Tumour ID", "Weight (mg)"
                                  )) {
+  if (!is.character(file_path) || length(file_path) != 1) {
+    stop("`file_path` must be a single file path (character string).")
+  }
+  if (!file.exists(file_path)) {
+    stop("File not found: ", file_path)
+  }
+
   data <- utils::read.csv(file_path, check.names = FALSE, stringsAsFactors = FALSE)
 
   # Remove QC pool samples if present
@@ -102,7 +109,7 @@ load_lipidomics_data <- function(file_path,
 #' @param want Either \code{"samples_rows"} or \code{"features_rows"}.
 #' @return \code{data_matrix} transposed as needed so that the requested entity
 #'   is on the rows.
-#' @keywords internal
+#' @noRd
 .orient_matrix <- function(data_matrix, metadata = NULL,
                            want = c("samples_rows", "features_rows")) {
   want <- match.arg(want)
@@ -149,6 +156,102 @@ load_lipidomics_data <- function(file_path,
   data_matrix
 }
 
+#' Validate a Metadata Data Frame (internal)
+#'
+#' Shared argument check used by functions that take a \code{metadata} data
+#' frame and (optionally) a \code{group_column} naming one of its columns.
+#' Throws a descriptive error instead of silently coercing or failing later
+#' with an opaque message.
+#'
+#' @param metadata Object expected to be a data.frame of sample metadata.
+#' @param group_column Optional column name expected to exist in
+#'   \code{metadata}.
+#' @return \code{TRUE}, invisibly. Called for its side effect (error on
+#'   invalid input).
+#' @noRd
+.validate_metadata <- function(metadata, group_column = NULL) {
+  if (!is.data.frame(metadata)) {
+    stop("`metadata` must be a data.frame, not ", class(metadata)[1], ".")
+  }
+  if (nrow(metadata) == 0) {
+    stop("`metadata` has no rows.")
+  }
+  if (!is.null(group_column) && !group_column %in% colnames(metadata)) {
+    stop(
+      "`group_column` (\"", group_column, "\") was not found in `metadata`. ",
+      "Available columns: ", paste(colnames(metadata), collapse = ", ")
+    )
+  }
+  invisible(TRUE)
+}
+
+#' Validate and Align a User-Supplied Design Matrix (internal)
+#'
+#' Used by \code{perform_differential_analysis_limma}/\code{_edger} when the
+#' caller supplies their own design matrix instead of the default
+#' \code{~0 + group} design. Aligns the design's rows to the sample (column)
+#' order of \code{data_matrix} by name when possible, and throws a
+#' descriptive error on mismatches rather than silently proceeding with
+#' misaligned samples.
+#'
+#' @param design Matrix or object coercible to one, with samples as rows.
+#' @param data_matrix Numeric matrix with features as rows and samples as
+#'   columns (i.e. already oriented via \code{.orient_matrix}).
+#' @return The validated (and, if possible, sample-aligned) design matrix.
+#' @noRd
+.validate_design <- function(design, data_matrix) {
+  if (!is.matrix(design)) design <- as.matrix(design)
+  if (is.null(colnames(design))) {
+    stop("`design` must have column names (used as contrast/group identifiers).")
+  }
+
+  n_samples <- ncol(data_matrix)
+  if (!is.null(rownames(design)) && !is.null(colnames(data_matrix))) {
+    missing_samples <- setdiff(colnames(data_matrix), rownames(design))
+    if (length(missing_samples) > 0) {
+      stop(
+        "`design` row names do not cover all samples in `data_matrix`. ",
+        "Missing: ", paste(missing_samples, collapse = ", ")
+      )
+    }
+    design <- design[colnames(data_matrix), , drop = FALSE]
+  } else if (nrow(design) != n_samples) {
+    stop(
+      "`design` has ", nrow(design), " row(s) but `data_matrix` has ",
+      n_samples, " sample(s); they must match. Add row names to `design` ",
+      "matching the sample names to align them automatically."
+    )
+  }
+  design
+}
+
+#' Validate a Numeric Data Matrix (internal)
+#'
+#' Shared argument check for functions that operate directly on a numeric
+#' abundance matrix (e.g. the individual \code{normalize_*} functions), which
+#' otherwise fail with cryptic base-R errors (from \code{rowSums}/\code{apply}/
+#' \code{sweep}) when passed non-numeric input.
+#'
+#' @param data Object expected to be a numeric matrix or data.frame.
+#' @param arg_name Name to use for \code{data} in the error message.
+#' @return \code{TRUE}, invisibly. Called for its side effect (error on
+#'   invalid input).
+#' @noRd
+.validate_numeric_matrix <- function(data, arg_name = "data") {
+  if (!is.matrix(data) && !is.data.frame(data)) {
+    stop("`", arg_name, "` must be a matrix or data.frame, not ", class(data)[1], ".")
+  }
+  is_numeric <- if (is.data.frame(data)) {
+    all(vapply(data, is.numeric, logical(1)))
+  } else {
+    is.numeric(data)
+  }
+  if (!is_numeric) {
+    stop("`", arg_name, "` must contain only numeric values.")
+  }
+  invisible(TRUE)
+}
+
 # ---------------------------------------------------------------------------
 # Lipid classification
 # ---------------------------------------------------------------------------
@@ -165,55 +268,73 @@ load_lipidomics_data <- function(file_path,
 #' @examples
 #' classify_lipids(c("PC 16:0_18:1", "TG 16:0_18:1_20:4", "Cer 16:0"))
 classify_lipids <- function(lipid_names) {
-  classify_single <- function(lipid) {
-    lc <- stringr::str_trim(lipid)
+  if (!is.character(lipid_names)) {
+    stop("`lipid_names` must be a character vector, not ", class(lipid_names)[1], ".")
+  }
+  do.call(rbind, lapply(lipid_names, .classify_single_lipid))
+}
 
-    group <- "Other/Unclassified"
-    type <- "Other"
-    saturation <- "Unclassified"
+#' Lipid Class Prefix Patterns (internal)
+#'
+#' Regex patterns used by \code{.classify_single_lipid} to assign a lipid
+#' name to a class/group. Checked in order; the first match wins.
+#'
+#' @return A list of \code{list(pat, grp, typ)} entries.
+#' @noRd
+.lipid_class_patterns <- function() {
+  list(
+    list(pat = "^PC", grp = "Glycerophospholipids", typ = "Phosphatidylcholine"),
+    list(pat = "^PE", grp = "Glycerophospholipids", typ = "Phosphatidylethanolamine"),
+    list(pat = "^PG", grp = "Glycerophospholipids", typ = "Phosphatidylglycerol"),
+    list(pat = "^PI", grp = "Glycerophospholipids", typ = "Phosphatidylinositol"),
+    list(pat = "^PS", grp = "Glycerophospholipids", typ = "Phosphatidylserine"),
+    list(pat = "^LPC", grp = "Lysophospholipids", typ = "Lysophosphatidylcholine"),
+    list(pat = "^LPE", grp = "Lysophospholipids", typ = "Lysophosphatidylethanolamine"),
+    list(pat = "^LPI", grp = "Lysophospholipids", typ = "Lysophosphatidylinositol"),
+    list(pat = "^DG", grp = "Glycerolipids", typ = "Diacylglycerol"),
+    list(pat = "^TG", grp = "Glycerolipids", typ = "Triacylglycerol"),
+    list(pat = "^dhCer", grp = "Sphingolipids", typ = "Dihydroceramide"),
+    list(pat = "^Cer", grp = "Sphingolipids", typ = "Ceramide"),
+    list(pat = "^Hex", grp = "Sphingolipids", typ = "Hexosylceramide"),
+    list(pat = "^SM", grp = "Sphingolipids", typ = "Sphingomyelin"),
+    list(pat = "^GM", grp = "Sphingolipids", typ = "Ganglioside"),
+    list(pat = "^Sulfatide", grp = "Sphingolipids", typ = "Sulfatide"),
+    list(pat = "^CE", grp = "Sterol Lipids", typ = "Cholesteryl Ester"),
+    list(pat = "^Desmosterol", grp = "Sterol Lipids", typ = "Desmosterol"),
+    list(pat = "^COH", grp = "Sterol Lipids", typ = "Cholesterol/Related"),
+    list(pat = "^Ubiquinone", grp = "Sterol Lipids", typ = "Ubiquinone"),
+    list(pat = "^AcylCarnitine", grp = "Acylcarnitines", typ = "Acylcarnitine"),
+    list(pat = "(IS)", grp = "Internal Standard", typ = NA_character_)
+  )
+}
 
-    classes <- list(
-      list(pat = "^PC", grp = "Glycerophospholipids", typ = "Phosphatidylcholine"),
-      list(pat = "^PE", grp = "Glycerophospholipids", typ = "Phosphatidylethanolamine"),
-      list(pat = "^PG", grp = "Glycerophospholipids", typ = "Phosphatidylglycerol"),
-      list(pat = "^PI", grp = "Glycerophospholipids", typ = "Phosphatidylinositol"),
-      list(pat = "^PS", grp = "Glycerophospholipids", typ = "Phosphatidylserine"),
-      list(pat = "^LPC", grp = "Lysophospholipids", typ = "Lysophosphatidylcholine"),
-      list(pat = "^LPE", grp = "Lysophospholipids", typ = "Lysophosphatidylethanolamine"),
-      list(pat = "^LPI", grp = "Lysophospholipids", typ = "Lysophosphatidylinositol"),
-      list(pat = "^DG", grp = "Glycerolipids", typ = "Diacylglycerol"),
-      list(pat = "^TG", grp = "Glycerolipids", typ = "Triacylglycerol"),
-      list(pat = "^dhCer", grp = "Sphingolipids", typ = "Dihydroceramide"),
-      list(pat = "^Cer", grp = "Sphingolipids", typ = "Ceramide"),
-      list(pat = "^Hex", grp = "Sphingolipids", typ = "Hexosylceramide"),
-      list(pat = "^SM", grp = "Sphingolipids", typ = "Sphingomyelin"),
-      list(pat = "^GM", grp = "Sphingolipids", typ = "Ganglioside"),
-      list(pat = "^Sulfatide", grp = "Sphingolipids", typ = "Sulfatide"),
-      list(pat = "^CE", grp = "Sterol Lipids", typ = "Cholesteryl Ester"),
-      list(pat = "^Desmosterol", grp = "Sterol Lipids", typ = "Desmosterol"),
-      list(pat = "^COH", grp = "Sterol Lipids", typ = "Cholesterol/Related"),
-      list(pat = "^Ubiquinone", grp = "Sterol Lipids", typ = "Ubiquinone"),
-      list(pat = "^AcylCarnitine", grp = "Acylcarnitines", typ = "Acylcarnitine"),
-      list(pat = "(IS)", grp = "Internal Standard", typ = lc)
-    )
+#' Classify a Single Lipid Name (internal)
+#'
+#' Worker function behind \code{classify_lipids}: matches one lipid name
+#' against \code{.lipid_class_patterns()} and determines its saturation.
+#'
+#' @param lipid A single lipid name.
+#' @return A one-row data frame with columns \code{Lipid}, \code{LipidGroup},
+#'   \code{LipidType}, and \code{Saturation}.
+#' @noRd
+.classify_single_lipid <- function(lipid) {
+  lc <- stringr::str_trim(lipid)
 
-    for (cl in classes) {
-      if (stringr::str_detect(lc, stringr::regex(cl$pat, ignore_case = TRUE))) {
-        group <- cl$grp
-        type <- cl$typ
-        break
-      }
+  group <- "Other/Unclassified"
+  type <- "Other"
+
+  for (cl in .lipid_class_patterns()) {
+    if (stringr::str_detect(lc, stringr::regex(cl$pat, ignore_case = TRUE))) {
+      group <- cl$grp
+      type <- if (identical(cl$grp, "Internal Standard")) lc else cl$typ
+      break
     }
-
-    saturation <- determine_saturation(lc)
-
-    data.frame(
-      Lipid = lc, LipidGroup = group, LipidType = type,
-      Saturation = saturation, stringsAsFactors = FALSE
-    )
   }
 
-  do.call(rbind, lapply(lipid_names, classify_single))
+  data.frame(
+    Lipid = lc, LipidGroup = group, LipidType = type,
+    Saturation = determine_saturation(lc), stringsAsFactors = FALSE
+  )
 }
 
 
@@ -422,6 +543,13 @@ get_normalization_descriptions <- function() {
 #' m <- matrix(rlnorm(60, 8, 1), nrow = 6, ncol = 10)
 #' apply_normalizations(m, c("TIC", "Log2"))
 apply_normalizations <- function(data, methods) {
+  if (!is.matrix(data) && !is.data.frame(data)) {
+    stop("`data` must be a matrix or data.frame, not ", class(data)[1], ".")
+  }
+  if (!is.character(methods) || length(methods) == 0) {
+    stop("`methods` must be a non-empty character vector of method names. ",
+      "See get_normalization_methods() for valid options.")
+  }
   if (!is.matrix(data)) data <- as.matrix(data)
   original_rownames <- rownames(data)
 
@@ -460,6 +588,7 @@ apply_normalizations <- function(data, methods) {
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 #' normalize_tic(m)
 normalize_tic <- function(data) {
+  .validate_numeric_matrix(data)
   tic <- rowSums(data, na.rm = TRUE)
   mean_tic <- mean(tic, na.rm = TRUE)
   sweep(data, 1, tic, "/") * mean_tic
@@ -477,6 +606,7 @@ normalize_tic <- function(data) {
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 #' normalize_pqn(m)
 normalize_pqn <- function(data) {
+  .validate_numeric_matrix(data)
   reference <- apply(data, 2, stats::median, na.rm = TRUE)
   quotients <- sweep(data, 2, reference, "/")
   median_quotients <- apply(quotients, 1, stats::median, na.rm = TRUE)
@@ -496,6 +626,7 @@ normalize_pqn <- function(data) {
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 #' normalize_quantile(m)
 normalize_quantile <- function(data) {
+  .validate_numeric_matrix(data)
   if (!is.matrix(data)) data <- as.matrix(data)
   storage.mode(data) <- "numeric"
 
@@ -539,27 +670,12 @@ normalize_quantile <- function(data) {
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 #' normalize_log2median(m)
 normalize_log2median <- function(data) {
+  .validate_numeric_matrix(data)
   log_data <- log2(data + 1)
   medians <- apply(log_data, 1, stats::median, na.rm = TRUE)
   global_median <- stats::median(medians, na.rm = TRUE)
   normalized <- sweep(log_data, 1, medians - global_median, "-")
   2^normalized - 1
-}
-
-#' @rdname normalize_log2median
-#' @export
-#' @examples
-#' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
-#' normalize_vsn(m)  # deprecated alias
-normalize_vsn <- function(data) {
-  .Deprecated("normalize_log2median",
-    msg = paste0(
-      "'normalize_vsn' has been renamed to 'normalize_log2median' to better ",
-      "reflect its implementation (log2 + median centering). ",
-      "Please update your code."
-    )
-  )
-  normalize_log2median(data)
 }
 
 #' Median Normalization
@@ -573,6 +689,7 @@ normalize_vsn <- function(data) {
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 #' normalize_median(m)
 normalize_median <- function(data) {
+  .validate_numeric_matrix(data)
   medians <- apply(data, 1, stats::median, na.rm = TRUE)
   global_median <- stats::median(medians, na.rm = TRUE)
   sweep(data, 1, medians / global_median, "/")
@@ -589,26 +706,12 @@ normalize_median <- function(data) {
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 #' normalize_mean(m)
 normalize_mean <- function(data) {
+  .validate_numeric_matrix(data)
   means <- apply(data, 1, mean, na.rm = TRUE)
   global_mean <- mean(means, na.rm = TRUE)
   sweep(data, 1, means / global_mean, "/")
 }
 
-
-#' Normalize Lipidomics Data
-#'
-#' Convenience wrapper around \code{apply_normalizations}.
-#'
-#' @param data Numeric matrix (samples as rows, lipids as columns).
-#' @param methods Character vector of normalization method names.
-#' @return Normalized numeric matrix.
-#' @export
-#' @examples
-#' m <- matrix(rlnorm(60, 8, 1), nrow = 6, ncol = 10)
-#' normalize_lipidomics_data(m, c("TIC", "Log2"))
-normalize_lipidomics_data <- function(data, methods = c("TIC", "Log2")) {
-  apply_normalizations(data, methods)
-}
 
 # ---------------------------------------------------------------------------
 # Custom classification helpers
@@ -633,6 +736,13 @@ normalize_lipidomics_data <- function(data, methods = c("TIC", "Log2")) {
 #' cls <- load_custom_classification(tmp)
 #' unlink(tmp)
 load_custom_classification <- function(file_path) {
+  if (!is.character(file_path) || length(file_path) != 1) {
+    stop("`file_path` must be a single file path (character string).")
+  }
+  if (!file.exists(file_path)) {
+    stop("File not found: ", file_path)
+  }
+
   classification <- utils::read.csv(file_path,
     check.names = FALSE,
     stringsAsFactors = FALSE
@@ -656,22 +766,11 @@ load_custom_classification <- function(file_path) {
 #' export_classification(cls, tmp)
 #' unlink(tmp)
 export_classification <- function(classification, file_path) {
+  if (!is.data.frame(classification)) {
+    stop("`classification` must be a data.frame, not ", class(classification)[1], ".")
+  }
   utils::write.csv(classification, file_path, row.names = FALSE)
   invisible(TRUE)
-}
-
-#' Get Lipid Classification
-#'
-#' Wrapper around \code{classify_lipids} for convenient scripting use.
-#'
-#' @param lipid_names Character vector of lipid names.
-#' @return Data frame with columns \code{Lipid}, \code{LipidGroup},
-#'   \code{LipidType}, and \code{Saturation}.
-#' @export
-#' @examples
-#' get_lipid_classification(c("PC 16:0_18:1", "PE 18:0_20:4"))
-get_lipid_classification <- function(lipid_names) {
-  classify_lipids(lipid_names)
 }
 
 #' Load Custom Enrichment Sets from a CSV File
@@ -695,6 +794,13 @@ get_lipid_classification <- function(lipid_names) {
 #' sets <- load_custom_enrichment_sets(tmp)
 #' unlink(tmp)
 load_custom_enrichment_sets <- function(file_path) {
+  if (!is.character(file_path) || length(file_path) != 1) {
+    stop("`file_path` must be a single file path (character string).")
+  }
+  if (!file.exists(file_path)) {
+    stop("File not found: ", file_path)
+  }
+
   sets_df <- utils::read.csv(file_path, check.names = FALSE, stringsAsFactors = FALSE)
   if (!all(c("Lipid", "Set_Name") %in% colnames(sets_df))) {
     stop("Custom sets file must contain 'Lipid' and 'Set_Name' columns.")
@@ -782,6 +888,9 @@ impute_missing_values <- function(data_matrix,
                                    k      = 5L,
                                    seed   = 42L) {
   method <- match.arg(method, get_imputation_methods())
+  if (!is.matrix(data_matrix) && !is.data.frame(data_matrix)) {
+    stop("`data_matrix` must be a matrix or data.frame, not ", class(data_matrix)[1], ".")
+  }
   if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
   storage.mode(data_matrix) <- "numeric"
 
@@ -836,7 +945,25 @@ impute_missing_values <- function(data_matrix,
         )
         return(impute_missing_values(data_matrix, method = "half_min"))
       }
+      # Set the seed for reproducible KNN imputation without permanently
+      # disturbing the caller's global RNG stream once this call returns.
+      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) {
+        get(".Random.seed", envir = .GlobalEnv)
+      } else {
+        NULL
+      }
+      on.exit(
+        {
+          if (is.null(old_seed)) {
+            if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
+          } else {
+            assign(".Random.seed", old_seed, envir = .GlobalEnv)
+          }
+        },
+        add = TRUE
+      )
       set.seed(seed)
+
       # impute::impute.knn expects features as rows, samples as columns
       imp <- impute::impute.knn(t(data_matrix), k = k)
       t(imp$data)
@@ -896,6 +1023,7 @@ correct_batch_effects <- function(data_matrix,
                                    group_column = "Sample Group",
                                    method       = "limma") {
   method <- match.arg(method, c("limma", "combat"))
+  .validate_metadata(metadata)
   if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
 
   if (!batch_column %in% colnames(metadata)) {
@@ -974,6 +1102,10 @@ correct_batch_effects <- function(data_matrix,
   corrected <- t(corrected_t)
   rownames(corrected) <- rownames(data_matrix)
   colnames(corrected) <- colnames(data_matrix)
+  # Record which method was actually used, so callers (e.g. the Shiny app)
+  # can detect and display a "combat" -> "limma" fallback rather than
+  # silently reporting the originally requested method.
+  attr(corrected, "method_used") <- method
   corrected
 }
 

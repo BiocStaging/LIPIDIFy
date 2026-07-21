@@ -32,13 +32,13 @@ All functions are available for programmatic use:
 data <- load_lipidomics_data("your_data.csv")
 
 # Normalize
-normalized <- normalize_lipidomics_data(data$numeric_data, methods = c("TIC", "Log2"))
+normalized <- apply_normalizations(data$numeric_data, methods = c("TIC", "Log2"))
 
 # Differential analysis
 results <- perform_differential_analysis(normalized, data$metadata)
 
 # Classification
-classification <- get_lipid_classification(colnames(data$numeric_data))
+classification <- classify_lipids(colnames(data$numeric_data))
 ```
 
 ---
