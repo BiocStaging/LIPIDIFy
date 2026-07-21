@@ -83,6 +83,73 @@ load_lipidomics_data <- function(file_path,
 }
 
 # ---------------------------------------------------------------------------
+# Matrix orientation
+# ---------------------------------------------------------------------------
+
+#' Orient a Data Matrix to Samples- or Features-as-Rows (internal)
+#'
+#' Deterministically orients an abundance matrix without guessing from the
+#' relative number of samples and features. Orientation is resolved by matching
+#' the matrix dimension names against the sample identifiers in \code{metadata}
+#' (the \code{Sample Name} column, or the metadata row names). This is robust
+#' whether there are more samples than features or vice versa. When sample
+#' identifiers cannot be matched by name, it falls back to matching the sample
+#' \emph{count}; if that is also ambiguous it assumes the matrix already has
+#' samples as rows.
+#'
+#' @param data_matrix Numeric matrix or object coercible to one.
+#' @param metadata Optional metadata data frame used to identify samples.
+#' @param want Either \code{"samples_rows"} or \code{"features_rows"}.
+#' @return \code{data_matrix} transposed as needed so that the requested entity
+#'   is on the rows.
+#' @keywords internal
+.orient_matrix <- function(data_matrix, metadata = NULL,
+                           want = c("samples_rows", "features_rows")) {
+  want <- match.arg(want)
+  if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
+
+  sample_ids <- NULL
+  n_samples <- NA_integer_
+  if (!is.null(metadata) && nrow(metadata) > 0) {
+    n_samples <- nrow(metadata)
+    if ("Sample Name" %in% colnames(metadata)) {
+      sample_ids <- as.character(metadata[["Sample Name"]])
+    } else if (!is.null(rownames(metadata))) {
+      sample_ids <- rownames(metadata)
+    }
+  }
+
+  rows_are_samples <- NA
+  # 1) Preferred: match sample identifiers against dimension names
+  if (!is.null(sample_ids)) {
+    if (!is.null(rownames(data_matrix)) &&
+      length(intersect(rownames(data_matrix), sample_ids)) > 0) {
+      rows_are_samples <- TRUE
+    } else if (!is.null(colnames(data_matrix)) &&
+      length(intersect(colnames(data_matrix), sample_ids)) > 0) {
+      rows_are_samples <- FALSE
+    }
+  }
+  # 2) Fallback: match the sample count (only when unambiguous)
+  if (is.na(rows_are_samples) && !is.na(n_samples)) {
+    if (nrow(data_matrix) == n_samples && ncol(data_matrix) != n_samples) {
+      rows_are_samples <- TRUE
+    } else if (ncol(data_matrix) == n_samples && nrow(data_matrix) != n_samples) {
+      rows_are_samples <- FALSE
+    }
+  }
+  # 3) Last resort: assume samples are already on the rows
+  if (is.na(rows_are_samples)) rows_are_samples <- TRUE
+
+  if (want == "samples_rows" && !rows_are_samples) {
+    data_matrix <- t(data_matrix)
+  } else if (want == "features_rows" && rows_are_samples) {
+    data_matrix <- t(data_matrix)
+  }
+  data_matrix
+}
+
+# ---------------------------------------------------------------------------
 # Lipid classification
 # ---------------------------------------------------------------------------
 
@@ -870,7 +937,10 @@ correct_batch_effects <- function(data_matrix,
     }
   }
 
-  # limma and ComBat expect features x samples
+  # limma and ComBat expect features x samples. Resolve orientation by sample
+  # identity first (robust to either input layout), then transpose so that
+  # features are on the rows and samples on the columns.
+  data_matrix <- .orient_matrix(data_matrix, metadata, want = "samples_rows")
   data_t <- t(data_matrix)
 
   corrected_t <- switch(method,

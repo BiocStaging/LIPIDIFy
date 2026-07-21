@@ -65,7 +65,10 @@ visualize_raw_data <- function(data_list, plot_type = "boxplot") {
 #' @param plot_type One of \code{"boxplot"}, \code{"violin"}, \code{"density"},
 #'   or \code{"histogram"}.
 #' @param view_mode Either \code{"sample"} or \code{"lipid"}.
-#' @param top_n Integer. Number of top-variable lipids to show in lipid mode.
+#' @param top_n Integer or \code{NULL}. In lipid mode, the number of most
+#'   variable lipids to display (defaults to 30 when \code{NULL}). In sample
+#'   mode, the number of most variable samples to display; \code{NULL} (the
+#'   default) shows all samples.
 #' @param metadata Optional metadata data frame (same row order as
 #'   \code{numeric_data}) used to colour samples by group when
 #'   \code{group_column} is provided.
@@ -79,7 +82,7 @@ visualize_raw_data <- function(data_list, plot_type = "boxplot") {
 visualize_raw_data_improved <- function(data_list,
                                         plot_type = "boxplot",
                                         view_mode = "sample",
-                                        top_n = 30,
+                                        top_n = NULL,
                                         metadata = NULL,
                                         group_column = "Sample Group") {
   numeric_data <- data_list$numeric_data
@@ -119,6 +122,22 @@ visualize_raw_data_improved <- function(data_list,
   # -------- Sample view --------------------------------------------------
   if (identical(view_mode, "sample")) {
     id_vars <- if (group_col_present) c("Sample", "Group") else "Sample"
+
+    # Optionally restrict to the top_n most variable samples (variance taken
+    # across each sample's lipid intensities). NULL/NA keeps all samples.
+    if (!is.null(top_n) && !is.na(top_n) && top_n > 0) {
+      feature_cols <- setdiff(colnames(df), c("Sample", "Group"))
+      if (length(feature_cols) > 0 && nrow(df) > top_n) {
+        sample_vars <- apply(df[, feature_cols, drop = FALSE], 1,
+          stats::var,
+          na.rm = TRUE
+        )
+        sample_vars[is.na(sample_vars)] <- 0
+        keep <- order(sample_vars, decreasing = TRUE)[seq_len(top_n)]
+        df <- df[sort(keep), , drop = FALSE]
+      }
+    }
+
     long <- pivot_long_safe(df, id_vars)
 
     # Sort samples by group if group information is available
@@ -281,6 +300,14 @@ visualize_raw_data_improved <- function(data_list,
 #' @param group_column Name of the group column in \code{metadata}.
 #' @param plot_type One of \code{"boxplot"}, \code{"violin"}, or
 #'   \code{"density"}. Defaults to \code{"boxplot"}.
+#' @param view_mode Either \code{"sample"} (one box/violin per sample; the
+#'   default, preserving previous behaviour) or \code{"lipid"} (one box/violin
+#'   per lipid). Ignored for \code{"density"}, which always shows the intensity
+#'   distribution.
+#' @param top_n Integer or \code{NULL}. In \code{"sample"} view, restrict the
+#'   plot to the \code{top_n} most variable samples (\code{NULL}, the default,
+#'   shows all). In \code{"lipid"} view, restrict to the \code{top_n} most
+#'   variable lipids (\code{NULL} defaults to 30).
 #' @return A \code{ggplot2} object.
 #' @export
 #' @examples
@@ -289,14 +316,12 @@ visualize_raw_data_improved <- function(data_list,
 #' print(p)
 create_pipeline_plot <- function(data_matrix, title = "Normalization Pipeline",
                                  metadata = NULL, group_column = "Sample Group",
-                                 plot_type = "boxplot") {
+                                 plot_type = "boxplot",
+                                 view_mode = "sample", top_n = NULL) {
   plot_type <- match.arg(plot_type, c("boxplot", "violin", "density"))
+  view_mode <- match.arg(view_mode, c("sample", "lipid"))
 
-  df <- if (is.matrix(data_matrix)) {
-    as.data.frame(data_matrix, check.names = FALSE)
-  } else {
-    as.data.frame(data_matrix, check.names = FALSE)
-  }
+  df <- as.data.frame(data_matrix, check.names = FALSE)
 
   if (is.null(rownames(df)) ||
     all(rownames(df) == as.character(seq_len(nrow(df))))) {
@@ -312,6 +337,26 @@ create_pipeline_plot <- function(data_matrix, title = "Normalization Pipeline",
 
   id_vars <- if (group_col_present) c("Sample", "Group") else "Sample"
 
+  # ---- Optional top-N selection (most variable samples or lipids) ----------
+  if (identical(view_mode, "lipid")) {
+    tn <- if (is.null(top_n) || is.na(top_n)) 30L else as.integer(top_n)
+    feature_cols <- setdiff(colnames(df), c("Sample", "Group"))
+    if (length(feature_cols) > tn) {
+      vars <- apply(df[, feature_cols, drop = FALSE], 2, stats::var, na.rm = TRUE)
+      vars[is.na(vars)] <- 0
+      keep_lipids <- names(sort(vars, decreasing = TRUE))[seq_len(tn)]
+      df <- df[, c(id_vars, keep_lipids), drop = FALSE]
+    }
+  } else if (!is.null(top_n) && !is.na(top_n) && top_n > 0) {
+    feature_cols <- setdiff(colnames(df), c("Sample", "Group"))
+    if (length(feature_cols) > 0 && nrow(df) > top_n) {
+      sample_vars <- apply(df[, feature_cols, drop = FALSE], 1, stats::var, na.rm = TRUE)
+      sample_vars[is.na(sample_vars)] <- 0
+      keep <- order(sample_vars, decreasing = TRUE)[seq_len(top_n)]
+      df <- df[sort(keep), , drop = FALSE]
+    }
+  }
+
   long <- tidyr::pivot_longer(df,
     cols = -tidyr::all_of(id_vars),
     names_to = "Lipid", values_to = "Intensity"
@@ -324,10 +369,14 @@ create_pipeline_plot <- function(data_matrix, title = "Normalization Pipeline",
     long$Sample <- factor(long$Sample, levels = sample_order)
   }
 
+  # x axis is samples or lipids depending on the view (density is unaffected)
+  x_col <- if (identical(view_mode, "lipid")) "Lipid" else "Sample"
+  x_lab <- x_col
+
   fill_aes <- if (group_col_present) {
-    ggplot2::aes(x = Sample, y = Intensity, fill = Group)
+    ggplot2::aes(x = .data[[x_col]], y = Intensity, fill = Group)
   } else {
-    ggplot2::aes(x = Sample, y = Intensity)
+    ggplot2::aes(x = .data[[x_col]], y = Intensity)
   }
   color_aes <- if (group_col_present) {
     ggplot2::aes(x = Intensity, color = Group)
@@ -345,7 +394,7 @@ create_pipeline_plot <- function(data_matrix, title = "Normalization Pipeline",
       ggplot2::geom_boxplot(outlier.alpha = 0.3) +
       base_theme +
       ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, hjust = 1, size = 6)) +
-      ggplot2::labs(title = title, x = "Sample", y = "Intensity")
+      ggplot2::labs(title = title, x = x_lab, y = "Intensity")
   } else if (plot_type == "violin") {
     p <- ggplot2::ggplot(long, fill_aes) +
       ggplot2::geom_violin(trim = FALSE, alpha = 0.7) +
@@ -355,7 +404,7 @@ create_pipeline_plot <- function(data_matrix, title = "Normalization Pipeline",
       ) +
       base_theme +
       ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, hjust = 1, size = 6)) +
-      ggplot2::labs(title = title, x = "Sample", y = "Intensity")
+      ggplot2::labs(title = title, x = x_lab, y = "Intensity")
   } else {
     p <- ggplot2::ggplot(long, color_aes) +
       ggplot2::geom_density(alpha = 0.5) +
@@ -397,9 +446,9 @@ create_heatmap_robust <- function(data_matrix, metadata,
         stop("Metadata is empty or NULL.")
       }
 
-      # Ensure features are rows
-      if (nrow(data_matrix) < ncol(data_matrix)) data_matrix <- t(data_matrix)
-      if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
+      # Orient with features as rows / samples as columns, resolved by sample
+      # identity rather than by comparing dimension sizes.
+      data_matrix <- .orient_matrix(data_matrix, metadata, want = "features_rows")
 
       # Resolve sample names
       sample_names <- if ("Sample Name" %in% colnames(metadata)) {
@@ -715,8 +764,9 @@ create_lipid_expression_barplot <- function(data_matrix,
                                             group_column = "Sample Group",
                                             data_type = "normalized") {
   if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
-  # Ensure samples are rows
-  if (ncol(data_matrix) < nrow(data_matrix)) data_matrix <- t(data_matrix)
+  # Orient with samples as rows, resolved by sample identity rather than by
+  # comparing dimension sizes (which fails when n_samples > n_features).
+  data_matrix <- .orient_matrix(data_matrix, metadata, want = "samples_rows")
   if (is.null(rownames(data_matrix))) {
     rownames(data_matrix) <- paste0("Sample_", seq_len(nrow(data_matrix)))
   }

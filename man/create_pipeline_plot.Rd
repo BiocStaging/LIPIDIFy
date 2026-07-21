@@ -9,7 +9,9 @@ create_pipeline_plot(
   title = "Normalization Pipeline",
   metadata = NULL,
   group_column = "Sample Group",
-  plot_type = "boxplot"
+  plot_type = "boxplot",
+  view_mode = "sample",
+  top_n = NULL
 )
 }
 \arguments{
@@ -25,6 +27,16 @@ colouring.}
 
 \item{plot_type}{One of \code{"boxplot"}, \code{"violin"}, or
 \code{"density"}. Defaults to \code{"boxplot"}.}
+
+\item{view_mode}{Either \code{"sample"} (one box/violin per sample; the
+default, preserving previous behaviour) or \code{"lipid"} (one box/violin
+per lipid). Ignored for \code{"density"}, which always shows the intensity
+distribution.}
+
+\item{top_n}{Integer or \code{NULL}. In \code{"sample"} view, restrict the
+plot to the \code{top_n} most variable samples (\code{NULL}, the default,
+shows all). In \code{"lipid"} view, restrict to the \code{top_n} most
+variable lipids (\code{NULL} defaults to 30).}
 }
 \value{
 A \code{ggplot2} object.

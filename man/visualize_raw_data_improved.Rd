@@ -8,7 +8,7 @@ visualize_raw_data_improved(
   data_list,
   plot_type = "boxplot",
   view_mode = "sample",
-  top_n = 30,
+  top_n = NULL,
   metadata = NULL,
   group_column = "Sample Group"
 )
@@ -22,7 +22,10 @@ or \code{"histogram"}.}
 
 \item{view_mode}{Either \code{"sample"} or \code{"lipid"}.}
 
-\item{top_n}{Integer. Number of top-variable lipids to show in lipid mode.}
+\item{top_n}{Integer or \code{NULL}. In lipid mode, the number of most
+variable lipids to display (defaults to 30 when \code{NULL}). In sample
+mode, the number of most variable samples to display; \code{NULL} (the
+default) shows all samples.}
 
 \item{metadata}{Optional metadata data frame (same row order as
 \code{numeric_data}) used to colour samples by group when

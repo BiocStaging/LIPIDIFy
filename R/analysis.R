@@ -38,10 +38,9 @@ perform_differential_analysis_limma <- function(data_matrix, metadata, group_col
     data_matrix <- as.matrix(data_matrix)
   }
 
-  # Ensure data matrix is transposed correctly (features as rows)
-  if (nrow(data_matrix) < ncol(data_matrix)) {
-    data_matrix <- t(data_matrix)
-  }
+  # Ensure data matrix is oriented with features as rows (samples as columns),
+  # resolved by sample identity rather than by comparing dimension sizes.
+  data_matrix <- .orient_matrix(data_matrix, metadata, want = "features_rows")
 
   # --- FIX: Store original group labels for UI/display ---
   original_groups <- as.character(metadata[[group_column]])
@@ -142,10 +141,9 @@ perform_differential_analysis_edger <- function(data_matrix, metadata, group_col
     data_matrix <- as.matrix(data_matrix)
   }
 
-  # Ensure data matrix is transposed correctly (features as rows)
-  if (nrow(data_matrix) < ncol(data_matrix)) {
-    data_matrix <- t(data_matrix)
-  }
+  # Ensure data matrix is oriented with features as rows (samples as columns),
+  # resolved by sample identity rather than by comparing dimension sizes.
+  data_matrix <- .orient_matrix(data_matrix, metadata, want = "features_rows")
 
   # Shift any negative values to zero (can arise after log-scale normalisation)
   # without rounding to integers, preserving the continuous nature of the data.
@@ -446,10 +444,10 @@ convert_list_columns_to_strings <- function(df) {
 #' pca_res <- perform_pca(norm, d$metadata, "Sample Group")
 #' names(pca_res)
 perform_pca <- function(data_matrix, metadata, group_column = "Sample Group") {
-  # Ensure data is in correct format (samples as rows)
-  if (ncol(data_matrix) < nrow(data_matrix)) {
-    data_matrix <- t(data_matrix)
-  }
+  # Orient with samples as rows, resolved by sample identity rather than by
+  # assuming features always outnumber samples (which fails when n_samples >
+  # n_features, e.g. large cohorts with a focused lipid panel).
+  data_matrix <- .orient_matrix(data_matrix, metadata, want = "samples_rows")
 
   # Remove any columns with zero variance
   var_cols <- apply(data_matrix, 2, stats::var, na.rm = TRUE) > 0
@@ -510,11 +508,9 @@ perform_plsda <- function(data_matrix, metadata, group_column = "Sample Group", 
         data_matrix <- as.matrix(data_matrix)
       }
 
-      # Ensure data is in correct format (samples as rows)
-      if (ncol(data_matrix) < nrow(data_matrix)) {
-        message("Transposing data matrix for PLS-DA")
-        data_matrix <- t(data_matrix)
-      }
+      # Orient with samples as rows, resolved by sample identity rather than by
+      # comparing dimension sizes (which fails when n_samples > n_features).
+      data_matrix <- .orient_matrix(data_matrix, metadata, want = "samples_rows")
 
       # Remove any columns with zero variance
       var_cols <- apply(data_matrix, 2, stats::var, na.rm = TRUE) > 0

@@ -672,6 +672,18 @@ Methods are applied left-to-right in the order you select them.
                   value = 30, min = 5, max = 200
                 )
               ),
+              shiny::conditionalPanel(
+                condition = "input.view_mode == 'sample'",
+                shiny::checkboxInput("limit_top_samples",
+                  "Limit to top N samples", value = FALSE
+                ),
+                shiny::conditionalPanel(
+                  condition = "input.limit_top_samples == true",
+                  shiny::numericInput("top_n_samples", "Top N Variable Samples:",
+                    value = 30, min = 2, max = 1000
+                  )
+                )
+              ),
               shiny::hr(),
               shiny::h5("Filter and Colour:"),
               checkbox_group_with_buttons(
@@ -737,6 +749,22 @@ Methods are applied left-to-right in the order you select them.
                   "Boxplot" = "boxplot",
                   "Violin" = "violin",
                   "Density" = "density"
+                )
+              ),
+              shiny::conditionalPanel(
+                condition = "input.norm_compare_plot_type != 'density'",
+                shiny::radioButtons("norm_compare_view_mode", "View By:",
+                  choices = c("By Sample" = "sample", "By Lipid" = "lipid"),
+                  selected = "sample", inline = TRUE
+                ),
+                shiny::checkboxInput("norm_compare_limit_top",
+                  "Limit to top N (most variable)", value = FALSE
+                ),
+                shiny::conditionalPanel(
+                  condition = "input.norm_compare_limit_top == true",
+                  shiny::numericInput("norm_compare_top_n", "Top N:",
+                    value = 30, min = 2, max = 1000
+                  )
                 )
               ),
               shiny::checkboxInput("norm_color_by_group",
@@ -892,6 +920,23 @@ Methods are applied left-to-right in the order you select them.
                 shiny::numericInput("norm_heatmap_top_n",
                   "Top N Variable Lipids:",
                   value = 50, min = 10, max = 200
+                )
+              ),
+              shiny::conditionalPanel(
+                condition = paste0(
+                  "input.norm_plot_type == 'boxplot' || ",
+                  "input.norm_plot_type == 'violin' || ",
+                  "input.norm_plot_type == 'density'"
+                ),
+                shiny::checkboxInput("norm_limit_top_samples",
+                  "Limit to top N samples", value = FALSE
+                ),
+                shiny::conditionalPanel(
+                  condition = "input.norm_limit_top_samples == true",
+                  shiny::numericInput("norm_top_n_samples",
+                    "Top N Variable Samples:",
+                    value = 30, min = 2, max = 1000
+                  )
                 )
               ),
               shiny::hr(),
@@ -1698,10 +1743,16 @@ Methods are applied left-to-right in the order you select them.
               shiny::plotOutput("raw_heatmap_plot", height = "600px")
             )
             output$raw_heatmap_plot <- shiny::renderPlot({
-              if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else hm
+              if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else print(hm)
             })
           } else {
-            top_n <- if (input$view_mode == "lipid") input$top_n_lipids else NULL
+            top_n <- if (input$view_mode == "lipid") {
+              input$top_n_lipids
+            } else if (isTRUE(input$limit_top_samples)) {
+              input$top_n_samples
+            } else {
+              NULL
+            }
             plot  <- visualize_raw_data_improved(
               raw_data_filtered, input$plot_type, input$view_mode,
               top_n, metadata = metadata
@@ -1756,13 +1807,25 @@ Methods are applied left-to-right in the order you select them.
       } else {
         "Pipeline 2"
       }
+      cmp_view <- if (is.null(input$norm_compare_view_mode)) {
+        "sample"
+      } else {
+        input$norm_compare_view_mode
+      }
+      cmp_top_n <- if (isTRUE(input$norm_compare_limit_top)) {
+        input$norm_compare_top_n
+      } else {
+        NULL
+      }
       p1 <- create_pipeline_plot(values$pipeline1_data,
         title = paste("Pipeline 1:", lbl1),
-        metadata = md, plot_type = pt
+        metadata = md, plot_type = pt,
+        view_mode = cmp_view, top_n = cmp_top_n
       )
       p2 <- create_pipeline_plot(values$pipeline2_data,
         title = paste("Pipeline 2:", lbl2),
-        metadata = md, plot_type = pt
+        metadata = md, plot_type = pt,
+        view_mode = cmp_view, top_n = cmp_top_n
       )
       shiny::isolate(values$current_pipeline_plots <- list(p1 = p1, p2 = p2))
       gridExtra::grid.arrange(p1, p2, ncol = 1)
@@ -1879,8 +1942,14 @@ Methods are applied left-to-right in the order you select them.
           if (input$norm_plot_type %in% c("boxplot", "violin", "density")) {
             dl <- list(numeric_data = filt_dat, metadata = filt_md)
             md_col <- if (isTRUE(input$norm_color_by_group_viz)) filt_md else NULL
+            norm_top_n <- if (isTRUE(input$norm_limit_top_samples)) {
+              input$norm_top_n_samples
+            } else {
+              NULL
+            }
             plot <- visualize_raw_data_improved(
               dl, input$norm_plot_type, "sample",
+              top_n = norm_top_n,
               metadata = md_col, group_column = group_col
             )
             values$current_norm_plot <- plot
@@ -1904,7 +1973,7 @@ Methods are applied left-to-right in the order you select them.
               shiny::plotOutput("norm_heatmap_plot", height = "600px")
             )
             output$norm_heatmap_plot <- shiny::renderPlot({
-              if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else hm
+              if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else print(hm)
             })
 
           } else if (input$norm_plot_type == "pca") {
@@ -2777,17 +2846,29 @@ Methods are applied left-to-right in the order you select them.
         shiny::req(values$raw_data)
         tryCatch(
           {
+            dl_view <- if (is.null(input$norm_compare_view_mode)) {
+              "sample"
+            } else {
+              input$norm_compare_view_mode
+            }
+            dl_top_n <- if (isTRUE(input$norm_compare_limit_top)) {
+              input$norm_compare_top_n
+            } else {
+              NULL
+            }
             p1 <- create_pipeline_plot(
               apply_normalizations(values$raw_data$numeric_data, input$norm_methods_1),
               paste("Pipeline 1:", paste(input$norm_methods_1, collapse = "->")),
               metadata = if (input$norm_color_by_group) values$raw_data$metadata else NULL,
-              plot_type = input$norm_compare_plot_type
+              plot_type = input$norm_compare_plot_type,
+              view_mode = dl_view, top_n = dl_top_n
             )
             p2 <- create_pipeline_plot(
               apply_normalizations(values$raw_data$numeric_data, input$norm_methods_2),
               paste("Pipeline 2:", paste(input$norm_methods_2, collapse = "->")),
               metadata = if (input$norm_color_by_group) values$raw_data$metadata else NULL,
-              plot_type = input$norm_compare_plot_type
+              plot_type = input$norm_compare_plot_type,
+              view_mode = dl_view, top_n = dl_top_n
             )
             combined <- gridExtra::arrangeGrob(p1, p2, ncol = 1)
             ggplot2::ggsave(file, combined,
