@@ -10,6 +10,42 @@
   paste0(paste(parts, collapse = "_"), ".", ext)
 }
 
+# Helper: escape dynamically generated text (contrast names, lipid names,
+# group names, plot labels, ...) so it renders safely as a heading, caption,
+# or table cell in the generated report.
+#
+# Underscores in names like "A375_ND_Vehicle" are otherwise interpreted by
+# LaTeX as the subscript operator outside math mode, producing a
+# "Missing $ inserted" compilation error when the report is rendered to PDF;
+# other LaTeX-special characters (%, $, &, #, {, }, ~, ^, \) have similar
+# failure modes. HTML output already renders these characters correctly as
+# plain text, so it is returned unchanged.
+#
+# Only display text passed through this function is affected -- callers
+# must keep using the original, unescaped value to index results (e.g.
+# diff_results$results[[nm]]); this function must only be applied at the
+# point where text is written into the Rmd content string.
+.escape_report_text <- function(x, output_format = "html") {
+  if (is.null(x)) {
+    return(x)
+  }
+  x <- as.character(x)
+  if (!identical(output_format, "pdf")) {
+    return(x)
+  }
+
+  # A literal backslash is swapped for a placeholder first, so the
+  # backslashes introduced by the escaping steps below are not themselves
+  # re-escaped by a later step.
+  placeholder <- "LATEXBACKSLASH"
+  x <- gsub("\\", placeholder, x, fixed = TRUE)
+  x <- gsub("([%$&#_{}])", "\\\\\\1", x)
+  x <- gsub("~", "\\textasciitilde{}", x, fixed = TRUE)
+  x <- gsub("^", "\\textasciicircum{}", x, fixed = TRUE)
+  x <- gsub(placeholder, "\\textbackslash{}", x, fixed = TRUE)
+  x
+}
+
 # ---------------------------------------------------------------------------
 # UI helper: checkbox group with Select All / Deselect All buttons
 # ---------------------------------------------------------------------------
@@ -3369,16 +3405,35 @@ Methods are applied left-to-right in the order you select them.
                                         output_format = "html",
                                         plot_files = list(),
                                         extra_plots = list()) {
+  # Escapes backslash/double-quote so a value can be safely embedded inside
+  # a double-quoted string in either YAML front matter or R source code --
+  # both use identical backslash escaping rules for this purpose.
+  quote_escape <- function(x) {
+    x <- gsub("\\", "\\\\", x, fixed = TRUE)
+    gsub('"', '\\"', x, fixed = TRUE)
+  }
+
   # ---- YAML header -------------------------------------------------------
+  # NOTE: title/author are NOT passed through .escape_report_text() here.
+  # They sit inside a YAML double-quoted scalar, which has its own backslash
+  # escaping rules -- inserting LaTeX escapes (e.g. "A375\_ND\_Vehicle")
+  # would make the YAML itself unparseable ("found unknown escape
+  # character"). Unlike fig.cap (a raw chunk option that bypasses pandoc's
+  # normal processing), title/author are parsed as regular pandoc metadata
+  # and are already correctly escaped for either output format by pandoc
+  # itself, so only YAML's own special characters need guarding here.
+  title_safe <- quote_escape(title)
+  author_safe <- quote_escape(author)
+
   yaml <- if (output_format == "pdf") {
     paste0(
-      '---\ntitle: "', title, '"\nauthor: "', author, '"\n',
+      '---\ntitle: "', title_safe, '"\nauthor: "', author_safe, '"\n',
       'date: "', format(Sys.Date(), "%B %d, %Y"), '"\n',
       "output:\n  pdf_document:\n    toc: true\n    toc_depth: 2\n---\n\n"
     )
   } else {
     paste0(
-      '---\ntitle: "', title, '"\nauthor: "', author, '"\n',
+      '---\ntitle: "', title_safe, '"\nauthor: "', author_safe, '"\n',
       'date: "', format(Sys.Date(), "%B %d, %Y"), '"\n',
       "output:\n  html_document:\n",
       "    toc: true\n    toc_float: true\n",
@@ -3402,11 +3457,26 @@ Methods are applied left-to-right in the order you select them.
   # Helper: embed a plot image in the Rmd.
   # path is just the filename (PNG is in the same dir as the Rmd).
   # file.exists is NOT checked here because knitr resolves relative to Rmd dir.
+  # fig.cap is a chunk OPTION, which knitr parses as R source code -- unlike
+  # headings/table cells (plain Markdown text), a literal LaTeX-escaped
+  # caption embedded directly as fig.cap="...\_..." would fail to parse
+  # (backslash is R's own string-escape character, and "\_" is not a valid
+  # R escape sequence). To avoid that, the (LaTeX-escaped) caption is first
+  # assigned to a uniquely named variable in a hidden setup chunk, and
+  # fig.cap references that variable instead of embedding literal text.
+  caption_state <- new.env(parent = emptyenv())
+  caption_state$n <- 0L
   embed_plot <- function(path, caption = "", width = "100%") {
     if (!is.null(path) && nchar(path) > 0) {
+      caption_state$n <- caption_state$n + 1L
+      var_name <- paste0("report_caption_", caption_state$n)
+      caption_safe <- .escape_report_text(caption, output_format)
       paste0(
+        "```{r ", var_name, "_setup, include=FALSE}\n",
+        var_name, ' <- "', quote_escape(caption_safe), '"\n',
+        "```\n",
         '\n```{r echo=FALSE, out.width="', width,
-        '", fig.cap="', gsub('"', "'", caption), '"}\n',
+        '", fig.cap=', var_name, '}\n',
         'knitr::include_graphics("', path, '")\n',
         "```\n\n"
       )
@@ -3440,7 +3510,7 @@ Methods are applied left-to-right in the order you select them.
           "| Group | Count |\n|-------|-------|\n",
           paste(
             vapply(names(gt), function(g) {
-              paste0("| ", g, " | ", gt[[g]], " |")
+              paste0("| ", .escape_report_text(g, output_format), " | ", gt[[g]], " |")
             }, character(1)),
             collapse = "\n"
           ),
@@ -3492,7 +3562,7 @@ Methods are applied left-to-right in the order you select them.
         n_down <- sum(res$adj.P.Val < 0.05 & res$logFC < 0, na.rm = TRUE)
         content <- paste0(
           content,
-          "### ", nm, "\n\n",
+          "### ", .escape_report_text(nm, output_format), "\n\n",
           "| Metric | Count |\n|--------|-------|\n",
           "| Total features | ", nrow(res), " |\n",
           "| Significant (adj.P < 0.05) | ", n_sig, " |\n",
@@ -3517,13 +3587,13 @@ Methods are applied left-to-right in the order you select them.
           top10 <- utils::head(sig, 10)
           content <- paste0(
             content,
-            "## Top Features -- ", first_nm, "\n\n",
+            "## Top Features -- ", .escape_report_text(first_nm, output_format), "\n\n",
             "| Lipid | LogFC | adj.P.Val | Direction |\n",
             "|-------|-------|-----------|----------|\n",
             paste(vapply(seq_len(nrow(top10)), function(i) {
               dir <- if (top10$logFC[i] > 0) "Increased" else "Decreased"
               paste0(
-                "| ", rownames(top10)[i],
+                "| ", .escape_report_text(rownames(top10)[i], output_format),
                 " | ", round(top10$logFC[i], 3),
                 " | ", format(top10$adj.P.Val[i], scientific = TRUE, digits = 3),
                 " | ", dir, " |"
@@ -3551,7 +3621,7 @@ Methods are applied left-to-right in the order you select them.
 
       for (nm in names(enrichment_results)) {
         cr <- enrichment_results[[nm]]
-        content <- paste0(content, "### ", nm, "\n\n")
+        content <- paste0(content, "### ", .escape_report_text(nm, output_format), "\n\n")
         for (et in names(cr)) {
           ed <- cr[[et]]
           sig <- if (!is.null(ed) && nrow(ed) > 0) {
@@ -3563,13 +3633,13 @@ Methods are applied left-to-right in the order you select them.
             top <- utils::head(sig[order(sig$pval), ], 5)
             content <- paste0(
               content,
-              "**", et, "** - significant pathways (padj < 0.25):\n\n",
+              "**", .escape_report_text(et, output_format), "** - significant pathways (padj < 0.25):\n\n",
               "| Pathway | NES | p-value | padj |\n",
               "|---------|-----|---------|------|\n",
               paste(vapply(
                 seq_len(nrow(top)), function(i) {
                   paste0(
-                    "| ", top$pathway[i],
+                    "| ", .escape_report_text(top$pathway[i], output_format),
                     " | ", round(top$NES[i], 3),
                     " | ", format(top$pval[i], scientific = TRUE, digits = 2),
                     " | ", format(top$padj[i], scientific = TRUE, digits = 2), " |"
@@ -3593,7 +3663,7 @@ Methods are applied left-to-right in the order you select them.
     for (e in extra_plots) {
       content <- paste0(
         content,
-        "## ", e$label, "\n\n",
+        "## ", .escape_report_text(e$label, output_format), "\n\n",
         embed_plot(e$file, e$label)
       )
     }

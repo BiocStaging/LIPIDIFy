@@ -50,7 +50,10 @@ Suggests:
     testthat (>= 3.0.0),
     impute,
     sva,
-    SummarizedExperiment
+    SummarizedExperiment,
+    tinytex,
+    shinytest2,
+    chromote
 VignetteBuilder: knitr
 biocViews: Software, Lipidomics, MassSpectrometry, Normalization,
     Preprocessing, DifferentialExpression, GeneSetEnrichment, Visualization,
