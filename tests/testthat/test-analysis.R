@@ -10,9 +10,9 @@ make_test_data <- function() {
 
 # 1. perform_differential_analysis (limma) ----------------------------------
 testthat::test_that("perform_differential_analysis (limma) returns expected structure", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  res  <- perform_differential_analysis(norm, d$metadata, "Sample Group", method = "limma")
+  res <- perform_differential_analysis(norm, d$metadata, "Sample Group", method = "limma")
 
   testthat::expect_true(is.list(res))
   testthat::expect_true(all(c("fit", "results", "design", "contrasts", "method") %in% names(res)))
@@ -23,7 +23,7 @@ testthat::test_that("perform_differential_analysis (limma) returns expected stru
 })
 
 testthat::test_that("perform_differential_analysis rejects invalid method", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(
     perform_differential_analysis(norm, d$metadata, "Sample Group", method = "not_a_method"),
@@ -32,7 +32,7 @@ testthat::test_that("perform_differential_analysis rejects invalid method", {
 })
 
 testthat::test_that("perform_differential_analysis rejects non-data.frame metadata", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(
     perform_differential_analysis(norm, as.list(d$metadata), "Sample Group"),
@@ -41,7 +41,7 @@ testthat::test_that("perform_differential_analysis rejects non-data.frame metada
 })
 
 testthat::test_that("perform_differential_analysis rejects missing group_column", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(
     perform_differential_analysis(norm, d$metadata, "Nonexistent Column"),
@@ -50,8 +50,8 @@ testthat::test_that("perform_differential_analysis rejects missing group_column"
 })
 
 testthat::test_that("perform_differential_analysis requires contrasts_list with custom design", {
-  d      <- make_test_data()
-  norm   <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
+  d <- make_test_data()
+  norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   groups <- factor(make.names(d$metadata$`Sample Group`))
   design <- stats::model.matrix(~ 0 + groups)
   colnames(design) <- levels(groups)
@@ -63,8 +63,8 @@ testthat::test_that("perform_differential_analysis requires contrasts_list with 
 })
 
 testthat::test_that("perform_differential_analysis accepts a custom design matrix (limma)", {
-  d      <- make_test_data()
-  norm   <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
+  d <- make_test_data()
+  norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   groups <- factor(make.names(d$metadata$`Sample Group`))
   design <- stats::model.matrix(~ 0 + groups)
   colnames(design) <- levels(groups)
@@ -80,9 +80,9 @@ testthat::test_that("perform_differential_analysis accepts a custom design matri
 })
 
 testthat::test_that("perform_differential_analysis (edger) returns expected structure", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  res  <- suppressWarnings(
+  res <- suppressWarnings(
     perform_differential_analysis(norm, d$metadata, "Sample Group", method = "edger")
   )
   testthat::expect_equal(res$method, "edger")
@@ -91,7 +91,7 @@ testthat::test_that("perform_differential_analysis (edger) returns expected stru
 })
 
 testthat::test_that("perform_differential_analysis (edger) warns about count-data assumption", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_warning(
     perform_differential_analysis(norm, d$metadata, "Sample Group", method = "edger"),
@@ -101,9 +101,9 @@ testthat::test_that("perform_differential_analysis (edger) warns about count-dat
 
 # 2. perform_pca --------------------------------------------------------------
 testthat::test_that("perform_pca returns expected structure", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  res  <- perform_pca(norm, d$metadata, "Sample Group")
+  res <- perform_pca(norm, d$metadata, "Sample Group")
 
   testthat::expect_true(all(c("pca_results", "pca_data", "plot", "variance_explained") %in% names(res)))
   testthat::expect_equal(nrow(res$pca_data), nrow(d$metadata))
@@ -111,32 +111,32 @@ testthat::test_that("perform_pca returns expected structure", {
 })
 
 testthat::test_that("perform_pca rejects non-data.frame metadata", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(perform_pca(norm, list(a = 1), "Sample Group"), "data.frame")
 })
 
 # 3. perform_plsda ------------------------------------------------------------
 testthat::test_that("perform_plsda returns expected structure", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  res  <- perform_plsda(norm, d$metadata, "Sample Group")
+  res <- perform_plsda(norm, d$metadata, "Sample Group")
 
   testthat::expect_true(all(c("plsda_results", "scores_data", "plot") %in% names(res)))
   testthat::expect_true(all(c("Sample", "Comp1", "Comp2", "Group") %in% colnames(res$scores_data)))
 })
 
 testthat::test_that("perform_plsda rejects non-data.frame metadata", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(perform_plsda(norm, list(a = 1), "Sample Group"), "data.frame")
 })
 
 # 4. perform_enrichment_analysis ----------------------------------------------
 testthat::test_that("perform_enrichment_analysis returns per-contrast, per-category results", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  cls  <- classify_lipids(colnames(norm))
+  cls <- classify_lipids(colnames(norm))
   diff <- perform_differential_analysis(norm, d$metadata, "Sample Group", method = "limma")
 
   enrich <- perform_enrichment_analysis(diff$results, cls, min_set_size = 3, max_set_size = 500)
@@ -150,7 +150,7 @@ testthat::test_that("perform_enrichment_analysis rejects non-list results_list",
 })
 
 testthat::test_that("perform_enrichment_analysis rejects classification_data without Lipid column", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   diff <- perform_differential_analysis(norm, d$metadata, "Sample Group", method = "limma")
   testthat::expect_error(

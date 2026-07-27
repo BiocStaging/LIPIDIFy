@@ -18,6 +18,9 @@
 # Output files from R CMD check
 /*.Rcheck/
 
+# Output folder from BiocCheck::BiocCheck()
+/*.BiocCheck/
+
 # RStudio files
 .Rproj.user/
 *.Rproj

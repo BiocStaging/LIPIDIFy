@@ -15,8 +15,10 @@
 #' print(p)
 visualize_raw_data <- function(data_list, plot_type = "boxplot") {
   if (!is.list(data_list) || is.null(data_list$numeric_data)) {
-    stop("`data_list` must be a list containing a `numeric_data` element ",
-      "(e.g. the output of load_lipidomics_data() or load_lipidomics_data_from_df()).")
+    stop(
+      "`data_list` must be a list containing a `numeric_data` element ",
+      "(e.g. the output of load_lipidomics_data() or load_lipidomics_data_from_df())."
+    )
   }
   numeric_data <- data_list$numeric_data
   if (is.matrix(numeric_data)) {

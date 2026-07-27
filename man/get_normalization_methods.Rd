@@ -11,8 +11,15 @@ Character vector of normalization method names supported by
   \code{apply_normalizations}.
 }
 \description{
-Return Available Normalization Method Names
+\code{"Log2Median"} and \code{"VSN"} are two distinct methods:
+\code{"Log2Median"} applies a fixed \code{log2(x + 1)} transform plus median
+centering, while \code{"VSN"} performs genuine variance-stabilising
+calibration via \code{vsn::justvsn()} (requires the Bioconductor \pkg{vsn}
+package).
 }
 \examples{
 get_normalization_methods()
+}
+\seealso{
+\code{\link{normalize_log2median}}, \code{\link{normalize_vsn}}.
 }

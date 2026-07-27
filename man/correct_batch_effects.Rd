@@ -49,10 +49,11 @@ Two methods are supported:
 }
 }
 \examples{
-d    <- load_lipidomics_data_from_df(generate_example_data())
+d <- load_lipidomics_data_from_df(generate_example_data())
 norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
 d$metadata$Batch <- rep(c("Batch1", "Batch2"), each = 10)
 corrected <- correct_batch_effects(norm, d$metadata,
-                                   batch_column = "Batch")
+  batch_column = "Batch"
+)
 dim(corrected)
 }

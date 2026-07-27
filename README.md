@@ -14,7 +14,9 @@ The package provides an end-to-end pipeline from raw lipidomics data to biologic
 - Flexible CSV data import with automatic metadata detection
 - **Automatic lipid classification** by class, subclass, and fatty-acid saturation (SFA/MUFA/PUFA)
 - Custom classification upload (any number of classification columns) with reset to automatic
-- Ten **normalization strategies**: TIC, PQN, Quantile, VSN, Median, Mean, Log2, Log10, Sqrt, None
+- Eleven **normalization strategies**: TIC, PQN, Quantile, VSN, Log2Median, Median, Mean, Log2, Log10, Sqrt, None
+  (VSN is true variance-stabilising normalization via the Bioconductor `vsn` package, and is a
+  separate method from Log2Median)
 - Pipeline builder: chain methods in any order and compare two pipelines side-by-side
 - **Differential abundance analysis** (limma, EdgeR) with automatic pairwise contrasts
 - **Enrichment analysis** of lipid classes or custom pathway sets (fgsea)
@@ -101,14 +103,18 @@ classification <- classify_lipids(colnames(data$numeric_data))
 ```r
 # View available methods
 get_normalization_methods()
-# [1] "TIC"      "PQN"      "Quantile" "VSN"      "Median"   "Mean"
-# [7] "Log2"     "Log10"    "Sqrt"     "None"
+#  [1] "TIC"        "PQN"     "Quantile" "VSN"   "Log2Median" "Median"
+#  [7] "Mean"       "Log2"    "Log10"    "Sqrt"  "None"
 
 # Apply a pipeline (methods chained in order)
 normalized <- apply_normalizations(
   data$numeric_data,
   methods = c("TIC", "Log2")
 )
+
+# True variance-stabilising normalization (needs BiocManager::install("vsn"))
+vsn_normalized <- apply_normalizations(data$numeric_data, methods = "VSN")
+# equivalently: normalize_vsn(data$numeric_data)
 ```
 
 ### Differential analysis
@@ -246,7 +252,8 @@ Data Upload
 | TIC | Divides each sample by its total ion current, rescaled to global mean | Variable injection amounts |
 | PQN | Probabilistic Quotient Normalization; robust to large fold-changes | General purpose |
 | Quantile | Forces identical distributions across all samples | Removes all between-sample distribution differences |
-| VSN | Variance Stabilizing (simplified): log2 + median centering | Mean-variance dependent data |
+| VSN | True Variance Stabilizing Normalization via `vsn::justvsn()` (Bioconductor `vsn`); fits an arcsinh/generalised-log transform by maximum likelihood | Positive, intensity-like data with mean-dependent variance |
+| Log2Median | Log2 Median Centering: fixed `log2(x + 1)` plus per-sample median centering — a **different**, simpler method than VSN | Quick, dependency-free alternative |
 | Median | Scales each sample to the global median | Simple and robust |
 | Mean | Scales each sample to the global mean | Similar to Median |
 | Log2 | Log base-2 transformation | Almost always applied as last step |
@@ -258,6 +265,21 @@ Methods are applied in the order selected. Recommended pipelines: **TIC + Log2**
 
 > **Note on Quantile normalization:** after applying Quantile normalization, all per-sample
 > boxplots will look nearly identical. This is the **expected, correct** behaviour, not a bug.
+
+> **Note on VSN:** `VSN` and `Log2Median` are two distinct methods — VSN estimates its
+> transformation from the data by robust maximum likelihood (Huber *et al.* 2002), whereas
+> Log2Median applies a fixed log2 transform and a median shift. Do not select VSN merely as
+> another name for a log transformation, and do not assume it is optimal for every lipidomics
+> dataset — compare pipelines first.
+>
+> VSN requires the Bioconductor `vsn` package (`BiocManager::install("vsn")`); if it is not
+> installed, the `"VSN"` method raises an error rather than falling back to another method.
+> It also requires at least 2 samples, at least 42 lipid features, and finite values. Infinite
+> values, all-missing samples or features, and samples with fewer than two observed values are
+> rejected with a descriptive error; missing
+> values are kept as `NA` (never imputed); negative values are passed through unchanged but
+> produce a warning, since VSN is intended for positive intensity-like data. VSN output is
+> already on a log-like scale, so do not chain a `Log2` step after it.
 
 ---
 

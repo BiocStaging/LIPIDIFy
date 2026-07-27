@@ -1,7 +1,7 @@
 Package: LIPIDIFy
 Type: Package
 Title: Comprehensive Lipidomics Data Analysis with Interactive Visualization
-Version: 0.99.2
+Version: 0.99.3
 Authors@R: c(
     person("Fayrouz", "Hammal", email = "fayrouz.hammal@petermac.org", 
            role = c("aut", "cre"),
@@ -50,6 +50,7 @@ Suggests:
     testthat (>= 3.0.0),
     impute,
     sva,
+    vsn,
     SummarizedExperiment,
     tinytex,
     shinytest2,

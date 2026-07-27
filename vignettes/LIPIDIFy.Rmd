@@ -17,13 +17,13 @@ vignette: >
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  collapse  = TRUE,
-  comment   = "#>",
+  collapse = TRUE,
+  comment = "#>",
   fig.width = 9,
   fig.height = 5,
   fig.align = "center",
-  warning   = FALSE,
-  message   = FALSE
+  warning = FALSE,
+  message = FALSE
 )
 ```
 
@@ -83,8 +83,9 @@ the end of this vignette for a worked example.
 ## Installation
 
 ```{r installation, eval=FALSE}
-if (!requireNamespace("BiocManager", quietly = TRUE))
-    install.packages("BiocManager")
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
 
 BiocManager::install("LIPIDIFy")
 ```
@@ -166,7 +167,7 @@ levels:
 - **Saturation** - SFA (0 double bonds), MUFA (1), PUFA (> 1)
 
 ```{r classify}
-lipid_names    <- colnames(raw_data$numeric_data)
+lipid_names <- colnames(raw_data$numeric_data)
 classification <- classify_lipids(lipid_names)
 
 head(classification, 8)
@@ -227,6 +228,56 @@ visualize_raw_data_improved(
 get_normalization_methods()
 ```
 
+## VSN and Log2Median are different methods
+
+Two of these deserve a note, because their names invite confusion:
+
+* **`"Log2Median"`** applies a *fixed* transformation: `log2(x + 1)`, then a
+  per-sample median shift onto a common baseline, back-transformed to the
+  original scale. Nothing is estimated from the data.
+* **`"VSN"`** performs genuine variance-stabilising calibration with
+  `vsn::justvsn()` from the Bioconductor
+  [vsn](https://bioconductor.org/packages/vsn/) package
+  (Huber *et al.*, *Bioinformatics* **18**, S96--S104, 2002).
+  It fits an arcsinh (generalised-log) transformation whose
+  parameters are estimated by robust maximum likelihood, simultaneously
+  calibrating between-sample differences and stabilising the
+  variance-versus-mean relationship.
+
+VSN may be appropriate for positive, intensity-like measurements whose
+variance grows with the mean -- a common pattern in raw MS lipidomics data.
+It is **not** simply another name for a log transformation, and it is not
+automatically the best choice for every lipidomics dataset; compare pipelines
+on your own data before committing to one.
+
+Practical restrictions:
+
+* The Bioconductor `vsn` package must be installed
+  (`BiocManager::install("vsn")`). If it is missing, `"VSN"` raises an error
+  -- it never silently falls back to another method.
+* At least 2 samples and at least 42 lipid features are required (vsn's
+  `minDataPointsPerStratum` default), and values must be finite. Infinite
+  values, samples or features that are entirely missing, and samples with
+  fewer than two observed values are rejected with a descriptive error.
+* Missing values are permitted: vsn fits on the observed values and returns
+  `NA` in the same positions. They are never imputed.
+* Negative values are passed to vsn unchanged but produce a warning, since
+  they usually indicate data that has already been log-transformed or
+  background-subtracted.
+* The output is already on a log-like scale, so do not chain a `"Log2"` step
+  after `"VSN"`.
+
+```{r norm-vsn, eval = requireNamespace("vsn", quietly = TRUE)}
+synthetic_obj_vsn <- load_lipidomics_data_from_df(generate_example_data())
+
+vsn_norm <- apply_normalizations(synthetic_obj_vsn$numeric_data, "VSN")
+dim(vsn_norm) # samples x lipids - orientation and dimnames preserved
+
+# Distinct from Log2Median, which is a different method:
+l2m_norm <- apply_normalizations(synthetic_obj_vsn$numeric_data, "Log2Median")
+isTRUE(all.equal(vsn_norm, l2m_norm))
+```
+
 ## Comparing pipelines side-by-side
 
 It is good practice to compare normalization strategies visually before
@@ -236,21 +287,23 @@ illustrate it here with the built-in synthetic dataset, comparing TIC+Log2
 fold-changes are expected):
 
 ```{r norm-compare, fig.cap="Side-by-side comparison of two normalization pipelines applied to the same raw, synthetic data.", fig.height=9}
-synthetic_df  <- generate_example_data()
+synthetic_df <- generate_example_data()
 synthetic_obj <- load_lipidomics_data_from_df(synthetic_df)
 
 pipeline1 <- apply_normalizations(synthetic_obj$numeric_data, c("TIC", "Log2"))
 pipeline2 <- apply_normalizations(synthetic_obj$numeric_data, c("PQN", "Log2"))
 
 p1 <- create_pipeline_plot(pipeline1,
-                            title     = "Pipeline 1: TIC + Log2",
-                            metadata  = synthetic_obj$metadata,
-                            plot_type = "boxplot")
+  title     = "Pipeline 1: TIC + Log2",
+  metadata  = synthetic_obj$metadata,
+  plot_type = "boxplot"
+)
 
 p2 <- create_pipeline_plot(pipeline2,
-                            title     = "Pipeline 2: PQN + Log2",
-                            metadata  = synthetic_obj$metadata,
-                            plot_type = "boxplot")
+  title     = "Pipeline 2: PQN + Log2",
+  metadata  = synthetic_obj$metadata,
+  plot_type = "boxplot"
+)
 
 gridExtra::grid.arrange(p1, p2, ncol = 1)
 ```
@@ -265,7 +318,7 @@ log-scale normalization:
 ```{r normalize}
 norm_data <- apply_normalizations(raw_data$numeric_data, methods = "Median")
 
-dim(norm_data)  # samples x lipids - same dimensions as raw data
+dim(norm_data) # samples x lipids - same dimensions as raw data
 ```
 
 ```{r norm-boxplot, fig.cap="Per-sample distributions after median-centring."}
@@ -301,8 +354,10 @@ print(get_imputation_methods())
 demo_norm <- norm_data
 set.seed(42)
 demo_norm[sample(length(demo_norm), size = round(0.05 * length(demo_norm)))] <- NA
-cat("Missingness introduced:", sum(is.na(demo_norm)),
-    sprintf("(%.1f%%)\n", 100 * mean(is.na(demo_norm))))
+cat(
+  "Missingness introduced:", sum(is.na(demo_norm)),
+  sprintf("(%.1f%%)\n", 100 * mean(is.na(demo_norm)))
+)
 
 imputed_norm <- impute_missing_values(demo_norm, method = "half_min")
 cat("Missing after imputation:", sum(is.na(imputed_norm)), "\n")
@@ -396,7 +451,7 @@ the default `~0 + group` design doesn't fit your experiment (e.g. paired
 samples, additional covariates).
 
 ```{r contrasts}
-groups    <- unique(raw_data$metadata$`Sample Group`)
+groups <- unique(raw_data$metadata$`Sample Group`)
 contrasts <- create_default_contrasts(groups)
 print(contrasts)
 ```
@@ -430,9 +485,9 @@ cat(sprintf("%-20s  %5s  %5s  %4s  %5s\n", "Contrast", "Total", "Sig", "Up", "Do
 cat(strrep("-", 48), "\n")
 
 for (nm in names(diff_res$results)) {
-  res    <- diff_res$results[[nm]]
-  n_sig  <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
-  n_up   <- sum(res$adj.P.Val < 0.05 & res$logFC > 0, na.rm = TRUE)
+  res <- diff_res$results[[nm]]
+  n_sig <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
+  n_up <- sum(res$adj.P.Val < 0.05 & res$logFC > 0, na.rm = TRUE)
   n_down <- sum(res$adj.P.Val < 0.05 & res$logFC < 0, na.rm = TRUE)
   cat(sprintf("%-20s  %5d  %5d  %4d  %5d\n", nm, nrow(res), n_sig, n_up, n_down))
 }
@@ -444,8 +499,8 @@ res_df <- diff_res$results[[first_contrast]]
 res_df <- res_df[order(res_df$adj.P.Val), ]
 
 top10 <- utils::head(res_df[, c("logFC", "AveExpr", "adj.P.Val")], 10)
-top10$logFC     <- round(top10$logFC, 3)
-top10$AveExpr   <- round(top10$AveExpr, 2)
+top10$logFC <- round(top10$logFC, 3)
+top10$AveExpr <- round(top10$AveExpr, 2)
 top10$adj.P.Val <- signif(top10$adj.P.Val, 3)
 
 cat("Top 10 features in:", first_contrast, "\n\n")
@@ -478,13 +533,13 @@ create_volcano_plot_labeled(
 ```{r heatmap, fig.cap="Heatmap of significant lipids. Rows (lipids) and columns (samples) are hierarchically clustered. Colour scale is z-scored per lipid.", fig.height=7}
 sig_lipids <- rownames(res_df)[
   !is.na(res_df$adj.P.Val) &
-  res_df$adj.P.Val < 0.05 &
-  abs(res_df$logFC) > 1
+    res_df$adj.P.Val < 0.05 &
+    abs(res_df$logFC) > 1
 ]
 
 if (length(sig_lipids) >= 5) {
-  top_n  <- min(30, length(sig_lipids))
-  avail  <- intersect(sig_lipids[seq_len(top_n)], colnames(norm_data))
+  top_n <- min(30, length(sig_lipids))
+  avail <- intersect(sig_lipids[seq_len(top_n)], colnames(norm_data))
   hm_mat <- t(norm_data[, avail, drop = FALSE])
 
   create_heatmap_robust(
@@ -552,10 +607,10 @@ grp_enrich <- enrich_res[[first_contrast]][["LipidGroup"]]
 
 if (!is.null(grp_enrich) && nrow(grp_enrich) > 0) {
   grp_enrich <- grp_enrich[order(grp_enrich$pval), ]
-  out        <- utils::head(grp_enrich[, c("pathway", "NES", "pval", "padj", "size")], 5)
-  out$NES    <- round(out$NES, 3)
-  out$pval   <- signif(out$pval, 3)
-  out$padj   <- signif(out$padj, 3)
+  out <- utils::head(grp_enrich[, c("pathway", "NES", "pval", "padj", "size")], 5)
+  out$NES <- round(out$NES, 3)
+  out$pval <- signif(out$pval, 3)
+  out$padj <- signif(out$padj, 3)
   print(out, row.names = FALSE)
 } else {
   cat("No enrichment results available.\n")

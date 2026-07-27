@@ -55,7 +55,7 @@ testthat::test_that("visualize_raw_data_improved handles unknown view_mode grace
 
 # 3. create_pipeline_plot -------------------------------------------------
 testthat::test_that("create_pipeline_plot works for boxplot/violin/density and both view modes", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
 
   for (pt in c("boxplot", "violin", "density")) {
@@ -84,9 +84,9 @@ testthat::test_that("create_pipeline_plot rejects non-data.frame metadata", {
 
 # 4. create_heatmap_robust -----------------------------------------------
 testthat::test_that("create_heatmap_robust returns a pheatmap object", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  hm   <- create_heatmap_robust(t(norm), d$metadata, "Sample Group", top_n = 10)
+  hm <- create_heatmap_robust(t(norm), d$metadata, "Sample Group", top_n = 10)
   testthat::expect_s3_class(hm, "pheatmap")
 })
 
@@ -96,7 +96,7 @@ testthat::test_that("create_heatmap_robust returns an error plot for bad input",
 })
 
 testthat::test_that("create_heatmap_robust returns an error plot for invalid metadata", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   p <- create_heatmap_robust(t(norm), list(not = "a data.frame"), "Sample Group")
   testthat::expect_s3_class(p, "ggplot")
@@ -116,11 +116,11 @@ testthat::test_that("fix_sample_alignment rejects non-data.frame metadata", {
 
 # 6. create_volcano_plot_labeled ------------------------------------------
 testthat::test_that("create_volcano_plot_labeled works with and without classification", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  cls  <- classify_lipids(colnames(norm))
+  cls <- classify_lipids(colnames(norm))
   diff <- perform_differential_analysis(norm, d$metadata, "Sample Group", method = "limma")
-  res  <- diff$results[[1]]
+  res <- diff$results[[1]]
 
   p1 <- create_volcano_plot_labeled(res)
   testthat::expect_s3_class(p1, "ggplot")
@@ -173,9 +173,9 @@ testthat::test_that("create_lipid_expression_barplot errors when no lipids match
 
 # 8. create_pca_plot_with_ellipses / create_plsda_plot_with_ellipses ------
 testthat::test_that("create_pca_plot_with_ellipses works for all ellipse types", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  pca  <- perform_pca(norm, d$metadata, "Sample Group")
+  pca <- perform_pca(norm, d$metadata, "Sample Group")
 
   for (et in c("none", "confidence", "visual")) {
     p <- create_pca_plot_with_ellipses(pca$pca_data, pca$variance_explained, ellipse_type = et)
@@ -191,8 +191,8 @@ testthat::test_that("create_pca_plot_with_ellipses validates pca_data columns", 
 })
 
 testthat::test_that("create_plsda_plot_with_ellipses works for all ellipse types", {
-  d     <- make_test_data()
-  norm  <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
+  d <- make_test_data()
+  norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   plsda <- perform_plsda(norm, d$metadata, "Sample Group")
 
   for (et in c("none", "confidence", "visual")) {
@@ -210,9 +210,9 @@ testthat::test_that("create_plsda_plot_with_ellipses validates plsda_data column
 
 # 9. create_enrichment_dotplot / create_enrichment_barplot ----------------
 testthat::test_that("enrichment plots work and handle empty results", {
-  d    <- make_test_data()
+  d <- make_test_data()
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
-  cls  <- classify_lipids(colnames(norm))
+  cls <- classify_lipids(colnames(norm))
   diff <- perform_differential_analysis(norm, d$metadata, "Sample Group", method = "limma")
   enrich <- perform_enrichment_analysis(diff$results, cls, min_set_size = 3)
   grp_enrich <- enrich[[1]][["LipidGroup"]]

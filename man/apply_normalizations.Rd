@@ -19,7 +19,19 @@ Normalized numeric matrix of the same dimensions as \code{data}.
 Applies normalization methods in the order supplied, passing the output of
 each step as the input to the next.
 }
+\details{
+Method names are matched exactly against
+\code{get_normalization_methods()}; an unrecognised name leaves the data
+unchanged. \code{"VSN"} and \code{"Log2Median"} are separate methods --
+\code{"VSN"} calls \code{\link{normalize_vsn}} (Bioconductor \pkg{vsn}) and
+\code{"Log2Median"} calls \code{\link{normalize_log2median}}. If \pkg{vsn}
+is not installed, \code{"VSN"} raises an error; it never falls back to
+another method.
+}
 \examples{
 m <- matrix(rlnorm(60, 8, 1), nrow = 6, ncol = 10)
 apply_normalizations(m, c("TIC", "Log2"))
+}
+\seealso{
+\code{\link{normalize_vsn}}, \code{\link{normalize_log2median}}.
 }

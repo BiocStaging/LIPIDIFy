@@ -466,14 +466,21 @@ test_saturation_classification <- function(test_lipids = NULL) {
 
 #' Return Available Normalization Method Names
 #'
+#' \code{"Log2Median"} and \code{"VSN"} are two distinct methods:
+#' \code{"Log2Median"} applies a fixed \code{log2(x + 1)} transform plus median
+#' centering, while \code{"VSN"} performs genuine variance-stabilising
+#' calibration via \code{vsn::justvsn()} (requires the Bioconductor \pkg{vsn}
+#' package).
+#'
 #' @return Character vector of normalization method names supported by
 #'   \code{apply_normalizations}.
+#' @seealso \code{\link{normalize_log2median}}, \code{\link{normalize_vsn}}.
 #' @export
 #' @examples
 #' get_normalization_methods()
 get_normalization_methods <- function() {
   c(
-    "TIC", "PQN", "Quantile", "Log2Median", "Median", "Mean",
+    "TIC", "PQN", "Quantile", "VSN", "Log2Median", "Median", "Mean",
     "Log2", "Log10", "Sqrt", "None"
   )
 }
@@ -506,13 +513,30 @@ get_normalization_descriptions <- function() {
       "After this step, per-sample boxplots will look nearly identical",
       "-- this is expected and correct behaviour, not a bug."
     ),
+    VSN = paste(
+      "Variance Stabilizing Normalization (VSN) via the Bioconductor 'vsn'",
+      "package (vsn::justvsn, Huber et al. 2002). Fits an arcsinh /",
+      "generalised-log transformation by robust maximum likelihood, calibrating",
+      "between-sample differences and stabilising variance that depends on the",
+      "mean. Appropriate for positive, intensity-like data with mean-dependent",
+      "variance; it is NOT simply another name for a log transformation, and it",
+      "is not automatically the best choice for every dataset -- compare",
+      "pipelines first. Requires at least 2 samples and 42 lipid features, and",
+      "finite input: infinite values, all-missing samples/features and samples",
+      "with fewer than two observed values are rejected,",
+      "missing values are returned as NA (never imputed), and",
+      "negative values trigger a warning. Output is already on a log-like",
+      "scale, so do not add a Log2 step after it.",
+      "Distinct from Log2Median."
+    ),
     Log2Median = paste(
       "Log2 Median Centering: log2-transforms the data (log2(x + 1)),",
       "then subtracts each sample's median deviation from the global median,",
       "effectively centering samples on a common baseline.",
       "Useful when variance scales with the mean intensity.",
-      "Note: this is a simplified variance-stabilising step, not the full",
-      "maximum-likelihood VSN procedure (Huber et al. 2002)."
+      "Note: this is a simplified, fixed variance-stabilising step, not the",
+      "maximum-likelihood VSN procedure (Huber et al. 2002) -- select the",
+      "separate 'VSN' method for that."
     ),
     Median = paste(
       "Median normalization scales each sample so that its median equals the",
@@ -534,10 +558,20 @@ get_normalization_descriptions <- function() {
 #' Applies normalization methods in the order supplied, passing the output of
 #' each step as the input to the next.
 #'
+#' @details
+#' Method names are matched exactly against
+#' \code{get_normalization_methods()}; an unrecognised name leaves the data
+#' unchanged. \code{"VSN"} and \code{"Log2Median"} are separate methods --
+#' \code{"VSN"} calls \code{\link{normalize_vsn}} (Bioconductor \pkg{vsn}) and
+#' \code{"Log2Median"} calls \code{\link{normalize_log2median}}. If \pkg{vsn}
+#' is not installed, \code{"VSN"} raises an error; it never falls back to
+#' another method.
+#'
 #' @param data Numeric matrix with samples in rows and lipids in columns.
 #' @param methods Character vector of method names as returned by
 #'   \code{get_normalization_methods()}.
 #' @return Normalized numeric matrix of the same dimensions as \code{data}.
+#' @seealso \code{\link{normalize_vsn}}, \code{\link{normalize_log2median}}.
 #' @export
 #' @examples
 #' m <- matrix(rlnorm(60, 8, 1), nrow = 6, ncol = 10)
@@ -547,8 +581,10 @@ apply_normalizations <- function(data, methods) {
     stop("`data` must be a matrix or data.frame, not ", class(data)[1], ".")
   }
   if (!is.character(methods) || length(methods) == 0) {
-    stop("`methods` must be a non-empty character vector of method names. ",
-      "See get_normalization_methods() for valid options.")
+    stop(
+      "`methods` must be a non-empty character vector of method names. ",
+      "See get_normalization_methods() for valid options."
+    )
   }
   if (!is.matrix(data)) data <- as.matrix(data)
   original_rownames <- rownames(data)
@@ -556,16 +592,17 @@ apply_normalizations <- function(data, methods) {
   normalized <- data
   for (method in methods) {
     normalized <- switch(method,
-      TIC        = normalize_tic(normalized),
-      PQN        = normalize_pqn(normalized),
-      Quantile   = normalize_quantile(normalized),
+      TIC = normalize_tic(normalized),
+      PQN = normalize_pqn(normalized),
+      Quantile = normalize_quantile(normalized),
+      VSN = normalize_vsn(normalized),
       Log2Median = normalize_log2median(normalized),
-      Median     = normalize_median(normalized),
-      Mean     = normalize_mean(normalized),
-      Log2     = log2(normalized + 1),
-      Log10    = log10(normalized + 1),
-      Sqrt     = sqrt(abs(normalized)),
-      None     = normalized,
+      Median = normalize_median(normalized),
+      Mean = normalize_mean(normalized),
+      Log2 = log2(normalized + 1),
+      Log10 = log10(normalized + 1),
+      Sqrt = sqrt(abs(normalized)),
+      None = normalized,
       normalized # unknown method: pass through
     )
   }
@@ -659,12 +696,17 @@ normalize_quantile <- function(data) {
 #' step suitable for mass-spectrometry lipidomics data.
 #'
 #' @details
-#' This method is \strong{not} equivalent to the full VSN procedure of
-#' Huber et al. (2002), which uses maximum-likelihood estimation. If true
-#' VSN is required, use the \pkg{vsn} Bioconductor package directly.
+#' This method is \strong{not} equivalent to the VSN procedure of
+#' Huber et al. (2002), which estimates its transformation by maximum
+#' likelihood. Log2 Median Centering applies a fixed \code{log2(x + 1)}
+#' transform and a per-sample median shift, and back-transforms to the
+#' original scale. For genuine variance-stabilising calibration use the
+#' separate \code{\link{normalize_vsn}} function (method name \code{"VSN"}),
+#' which calls \code{vsn::justvsn()}.
 #'
 #' @param data Numeric matrix (samples as rows, lipids as columns).
 #' @return Log2-median-centred numeric matrix.
+#' @seealso \code{\link{normalize_vsn}} for true VSN.
 #' @export
 #' @examples
 #' m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
@@ -676,6 +718,234 @@ normalize_log2median <- function(data) {
   global_median <- stats::median(medians, na.rm = TRUE)
   normalized <- sweep(log_data, 1, medians - global_median, "-")
   2^normalized - 1
+}
+
+# ----- VSN (Bioconductor vsn) ----------------------------------------------
+
+#' Is the vsn Package Installed? (internal)
+#'
+#' Split out from \code{.require_vsn()} so that tests can simulate a missing
+#' \pkg{vsn} installation with \code{testthat::local_mocked_bindings()}.
+#'
+#' @return \code{TRUE} if the \pkg{vsn} namespace can be loaded.
+#' @noRd
+.vsn_installed <- function() {
+  requireNamespace("vsn", quietly = TRUE)
+}
+
+#' Require the vsn Package (internal)
+#'
+#' Throws a descriptive, actionable error when \pkg{vsn} is not installed.
+#' Deliberately does \strong{not} fall back to another normalization method:
+#' silently substituting a different transformation would misreport what was
+#' done to the data.
+#'
+#' @return \code{TRUE}, invisibly.
+#' @noRd
+.require_vsn <- function() {
+  if (!.vsn_installed()) {
+    stop(
+      "VSN normalization requires the Bioconductor package 'vsn'. ",
+      "Install it with BiocManager::install('vsn').",
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
+#' Minimum Features vsn Requires per Stratum (internal)
+#'
+#' Mirrors the \code{minDataPointsPerStratum} default of \code{vsn::vsn2()}.
+#'
+#' @return Integer scalar.
+#' @noRd
+.vsn_min_features <- function() 42L
+
+#' Validate a Matrix Before VSN Calibration (internal)
+#'
+#' Checks the preconditions of \code{vsn::justvsn()} up front so that unusable
+#' input produces an actionable message instead of a cryptic optimiser error
+#' (e.g. \code{"L-BFGS-B needs finite values of 'fn'"}). Nothing is silently
+#' repaired here: invalid values are reported, never replaced.
+#'
+#' @param data Numeric matrix with samples as rows and lipids as columns.
+#' @param min_features Minimum number of lipid features vsn requires.
+#' @return \code{TRUE}, invisibly. Called for its side effect (error or
+#'   warning on unsuitable input).
+#' @noRd
+.validate_vsn_input <- function(data, min_features = .vsn_min_features()) {
+  if (any(is.infinite(data))) {
+    n_inf <- sum(is.infinite(data))
+    stop(
+      "`data` contains ", n_inf, " infinite value(s); VSN cannot be fitted on ",
+      "non-finite data. Remove or replace these values explicitly before ",
+      "calling normalize_vsn().",
+      call. = FALSE
+    )
+  }
+  if (nrow(data) < 2L) {
+    stop(
+      "VSN requires at least 2 samples; `data` has ", nrow(data), ".",
+      call. = FALSE
+    )
+  }
+  if (ncol(data) < min_features) {
+    stop(
+      "VSN requires at least ", min_features, " lipid features to estimate its ",
+      "transformation parameters reliably; `data` has ", ncol(data), ". ",
+      "Pass a lower `minDataPointsPerStratum` to normalize_vsn() only if you ",
+      "are sure this is appropriate for your data.",
+      call. = FALSE
+    )
+  }
+
+  empty_samples <- which(rowSums(is.finite(data)) == 0L)
+  if (length(empty_samples) > 0L) {
+    labs <- if (is.null(rownames(data))) empty_samples else rownames(data)[empty_samples]
+    stop(
+      "VSN cannot be fitted: ", length(empty_samples), " sample(s) contain no ",
+      "finite values (", paste(utils::head(labs, 5L), collapse = ", "),
+      if (length(labs) > 5L) ", ..." else "", "). ",
+      "Remove these samples before normalizing.",
+      call. = FALSE
+    )
+  }
+  empty_features <- which(colSums(is.finite(data)) == 0L)
+  if (length(empty_features) > 0L) {
+    labs <- if (is.null(colnames(data))) empty_features else colnames(data)[empty_features]
+    stop(
+      "VSN cannot be fitted: ", length(empty_features), " lipid feature(s) ",
+      "contain no finite values (", paste(utils::head(labs, 5L), collapse = ", "),
+      if (length(labs) > 5L) ", ..." else "", "). ",
+      "Remove these features before normalizing.",
+      call. = FALSE
+    )
+  }
+
+  # Every sample needs more than a single observed value for its calibration
+  # parameters to mean anything, even though vsn tolerates scattered NAs.
+  sparse_samples <- which(rowSums(is.finite(data)) < 2L)
+  if (length(sparse_samples) > 0L) {
+    labs <- if (is.null(rownames(data))) sparse_samples else rownames(data)[sparse_samples]
+    stop(
+      "VSN requires at least 2 finite observations per sample; ",
+      length(sparse_samples), " sample(s) have fewer (",
+      paste(utils::head(labs, 5L), collapse = ", "),
+      if (length(labs) > 5L) ", ..." else "", ").",
+      call. = FALSE
+    )
+  }
+
+  # vsn's glog model tolerates negative values, but they usually indicate data
+  # that has already been log-transformed or background-subtracted, for which
+  # VSN calibration is not meaningful. Warn rather than alter the data.
+  n_neg <- sum(data < 0, na.rm = TRUE)
+  if (n_neg > 0L) {
+    warning(
+      "`data` contains ", n_neg, " negative value(s). VSN expects positive, ",
+      "intensity-like measurements; results on already log-transformed or ",
+      "background-subtracted data may not be meaningful. ",
+      "The values were passed to vsn unchanged.",
+      call. = FALSE
+    )
+  }
+  if (anyNA(data)) {
+    message(
+      "`data` contains ", sum(is.na(data)), " missing value(s). vsn estimates ",
+      "its parameters from the observed values; missing entries are returned ",
+      "as NA (they are not imputed)."
+    )
+  }
+  invisible(TRUE)
+}
+
+#' VSN (Variance Stabilizing Normalization)
+#'
+#' Applies genuine variance-stabilising normalization using
+#' \code{vsn::justvsn()} from the Bioconductor \pkg{vsn} package
+#' (Huber et al. 2002). The method fits an arcsinh-based (generalised log)
+#' transformation whose parameters are estimated by robust maximum likelihood,
+#' simultaneously calibrating between-sample differences and stabilising the
+#' variance-versus-mean dependence typical of raw intensity data.
+#'
+#' @details
+#' This is a \strong{different} method from
+#' \code{\link{normalize_log2median}}: VSN estimates its transformation from
+#' the data, whereas Log2 Median Centering applies a fixed \code{log2(x + 1)}
+#' transform followed by median centering. VSN is not simply another name for
+#' a log transformation, and it is not universally the best choice for every
+#' lipidomics dataset -- compare pipelines before committing to one.
+#'
+#' \strong{Orientation.} The LIPIDIFy normalization contract is samples as
+#' rows and lipids as columns, while \code{vsn::justvsn()} expects features as
+#' rows and samples as columns. This function transposes explicitly before and
+#' after the call, and restores the original dimension names; the returned
+#' matrix has the same orientation, dimensions and dimnames as \code{data}.
+#'
+#' \strong{Restrictions.} Input must be numeric, finite (no \code{Inf}/
+#' \code{-Inf}), and contain at least 2 samples and at least
+#' \code{minDataPointsPerStratum} (42 by default) lipid features. Samples or
+#' features consisting entirely of missing values are rejected, as are
+#' samples with fewer than two observed values. \code{NA}
+#' values are permitted: vsn fits on the observed values and returns \code{NA}
+#' in the same positions -- they are not imputed. Negative values produce a
+#' warning because VSN is intended for positive, intensity-like data with a
+#' mean-dependent variance; nothing is silently replaced or coerced.
+#'
+#' Output is on a generalised-log (roughly log2) scale, so VSN should not be
+#' chained with an additional \code{"Log2"} step.
+#'
+#' @param data Numeric matrix or data frame (samples as rows, lipids as
+#'   columns).
+#' @param ... Further arguments passed to \code{vsn::justvsn()}, e.g.
+#'   \code{minDataPointsPerStratum}.
+#' @return VSN-calibrated numeric matrix with the same dimensions, orientation
+#'   and dimnames as \code{data}.
+#' @references
+#' Huber W, von Heydebreck A, Sueltmann H, Poustka A, Vingron M (2002).
+#' Variance stabilization applied to microarray data calibration and to the
+#' quantification of differential expression. \emph{Bioinformatics}
+#' \strong{18}, S96--S104.
+#' @seealso \code{\link{normalize_log2median}} for the (separate) log2 median
+#'   centering method, and \code{\link{apply_normalizations}}.
+#' @export
+#' @examples
+#' if (requireNamespace("vsn", quietly = TRUE)) {
+#'   # vsn needs at least 42 features, so use 8 samples x 60 lipids
+#'   m <- outer(1:8, 1:60, function(i, j) exp(6 + 0.05 * j + 0.3 * sin(i + j)))
+#'   rownames(m) <- paste0("Sample_", seq_len(8))
+#'   colnames(m) <- paste0("Lipid_", seq_len(60))
+#'   dim(normalize_vsn(m))
+#' }
+normalize_vsn <- function(data, ...) {
+  .require_vsn()
+  .validate_numeric_matrix(data)
+  if (!is.matrix(data)) data <- as.matrix(data)
+  storage.mode(data) <- "numeric"
+
+  dots <- list(...)
+  min_features <- if (!is.null(dots$minDataPointsPerStratum)) {
+    as.integer(dots$minDataPointsPerStratum)
+  } else {
+    .vsn_min_features()
+  }
+  .validate_vsn_input(data, min_features = min_features)
+
+  # vsn::justvsn() expects features as rows and samples as columns; the
+  # LIPIDIFy contract is samples as rows. Transpose explicitly both ways.
+  calibrated_t <- vsn::justvsn(t(data), ...)
+  normalized <- t(as.matrix(calibrated_t))
+
+  if (!identical(dim(normalized), dim(data))) {
+    stop(
+      "vsn::justvsn() returned a ", paste(dim(normalized), collapse = " x "),
+      " matrix for a ", paste(dim(data), collapse = " x "), " input; ",
+      "the VSN result was not applied.",
+      call. = FALSE
+    )
+  }
+  dimnames(normalized) <- dimnames(data)
+  normalized
 }
 
 #' Median Normalization
@@ -884,9 +1154,9 @@ get_imputation_descriptions <- function() {
 #' m <- matrix(c(1000, NA, 3000, NA, 500, 1500), nrow = 2)
 #' impute_missing_values(m, method = "half_min")
 impute_missing_values <- function(data_matrix,
-                                   method = "half_min",
-                                   k      = 5L,
-                                   seed   = 42L) {
+                                  method = "half_min",
+                                  k = 5L,
+                                  seed = 42L) {
   method <- match.arg(method, get_imputation_methods())
   if (!is.matrix(data_matrix) && !is.data.frame(data_matrix)) {
     stop("`data_matrix` must be a matrix or data.frame, not ", class(data_matrix)[1], ".")
@@ -1011,17 +1281,18 @@ impute_missing_values <- function(data_matrix,
 #'   \code{data_matrix}.
 #' @export
 #' @examples
-#' d    <- load_lipidomics_data_from_df(generate_example_data())
+#' d <- load_lipidomics_data_from_df(generate_example_data())
 #' norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
 #' d$metadata$Batch <- rep(c("Batch1", "Batch2"), each = 10)
 #' corrected <- correct_batch_effects(norm, d$metadata,
-#'                                    batch_column = "Batch")
+#'   batch_column = "Batch"
+#' )
 #' dim(corrected)
 correct_batch_effects <- function(data_matrix,
-                                   metadata,
-                                   batch_column,
-                                   group_column = "Sample Group",
-                                   method       = "limma") {
+                                  metadata,
+                                  batch_column,
+                                  group_column = "Sample Group",
+                                  method = "limma") {
   method <- match.arg(method, c("limma", "combat"))
   .validate_metadata(metadata)
   if (!is.matrix(data_matrix)) data_matrix <- as.matrix(data_matrix)
@@ -1043,13 +1314,13 @@ correct_batch_effects <- function(data_matrix,
   # without group protection, emitting a warning instead.
   design_protect <- NULL
   if (!is.null(group_column) && group_column %in% colnames(metadata)) {
-    groups         <- factor(make.names(as.character(metadata[[group_column]])))
-    design_raw     <- stats::model.matrix(~ groups)
+    groups <- factor(make.names(as.character(metadata[[group_column]])))
+    design_raw <- stats::model.matrix(~groups)
 
     # Check rank: combine batch indicator columns with the group design and
     # test whether the full matrix is full-rank.
-    batch_dummy  <- stats::model.matrix(~ batch - 1)
-    combined     <- cbind(design_raw, batch_dummy)
+    batch_dummy <- stats::model.matrix(~ batch - 1)
+    combined <- cbind(design_raw, batch_dummy)
     if (qr(combined)$rank < ncol(combined)) {
       warning(
         "The group column ('", group_column, "') is perfectly confounded with ",
@@ -1087,13 +1358,15 @@ correct_batch_effects <- function(data_matrix,
           call. = FALSE
         )
         return(correct_batch_effects(data_matrix, metadata, batch_column,
-                                      group_column, method = "limma"))
+          group_column,
+          method = "limma"
+        ))
       }
       sva::ComBat(
-        dat        = data_t,
-        batch      = batch,
-        mod        = design_protect,
-        par.prior  = TRUE,
+        dat = data_t,
+        batch = batch,
+        mod = design_protect,
+        par.prior = TRUE,
         prior.plots = FALSE
       )
     }
@@ -1108,4 +1381,3 @@ correct_batch_effects <- function(data_matrix,
   attr(corrected, "method_used") <- method
   corrected
 }
-

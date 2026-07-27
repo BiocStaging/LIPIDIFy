@@ -10,13 +10,13 @@
 # 1. .orient_matrix (internal) ------------------------------------------------
 testthat::test_that(".orient_matrix orients by sample-name match", {
   md <- data.frame(`Sample Name` = c("S1", "S2", "S3"), check.names = FALSE)
-  m  <- matrix(1:6, nrow = 3, dimnames = list(c("S1", "S2", "S3"), c("L1", "L2")))
+  m <- matrix(1:6, nrow = 3, dimnames = list(c("S1", "S2", "S3"), c("L1", "L2")))
   oriented <- LIPIDIFy:::.orient_matrix(m, md, want = "features_rows")
   testthat::expect_equal(rownames(oriented), c("L1", "L2"))
 })
 
 testthat::test_that(".orient_matrix falls back to sample count when names are absent", {
-  m <- matrix(1:12, nrow = 3, ncol = 4)  # 3 samples x 4 features, no dimnames
+  m <- matrix(1:12, nrow = 3, ncol = 4) # 3 samples x 4 features, no dimnames
   md <- data.frame(x = 1:3)
   oriented <- LIPIDIFy:::.orient_matrix(m, md, want = "samples_rows")
   testthat::expect_equal(nrow(oriented), 3)
@@ -28,9 +28,11 @@ testthat::test_that("perform_pca works when samples outnumber features", {
   m <- matrix(stats::rlnorm(40 * 5, 8, 1), nrow = 40, ncol = 5)
   rownames(m) <- paste0("S", seq_len(40))
   colnames(m) <- paste0("Lipid_", seq_len(5))
-  md <- data.frame(`Sample Name` = rownames(m),
-                    `Sample Group` = rep(c("A", "B"), each = 20),
-                    check.names = FALSE)
+  md <- data.frame(
+    `Sample Name` = rownames(m),
+    `Sample Group` = rep(c("A", "B"), each = 20),
+    check.names = FALSE
+  )
   res <- perform_pca(m, md, "Sample Group")
   testthat::expect_equal(nrow(res$pca_data), 40)
 })

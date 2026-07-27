@@ -86,14 +86,19 @@ build_fake_report_inputs <- function(report_dir) {
 
   metadata <- data.frame(
     `Sample Name` = paste0("S", 1:4),
-    `Sample Group` = c("A375_ND_Vehicle", "A375_ND_Vehicle",
-                        "A375_HFD_Vehicle", "A375_HFD_Vehicle"),
+    `Sample Group` = c(
+      "A375_ND_Vehicle", "A375_ND_Vehicle",
+      "A375_HFD_Vehicle", "A375_HFD_Vehicle"
+    ),
     check.names = FALSE
   )
   numeric_data <- matrix(
-    stats::rlnorm(4 * 3, 8, 1), nrow = 4,
-    dimnames = list(metadata$`Sample Name`,
-                     c("PC(16:0_18:1)", "10%_Treatment", "A&B"))
+    stats::rlnorm(4 * 3, 8, 1),
+    nrow = 4,
+    dimnames = list(
+      metadata$`Sample Name`,
+      c("PC(16:0_18:1)", "10%_Treatment", "A&B")
+    )
   )
   raw_data <- list(
     data = cbind(metadata, numeric_data),
@@ -127,12 +132,16 @@ build_fake_report_inputs <- function(report_dir) {
   # caption) and one expression-plot entry using the exact reported lipid
   # name "PC 14:1_19:5" (the second-round failure).
   extra_plots <- list(
-    list(file = basename(volcano_png),
-         label = paste("Volcano", contrast_nm),
-         section = "Results"),
-    list(file = basename(expression_png),
-         label = paste("Expression", "PC 14:1_19:5"),
-         section = "Lipid Expression")
+    list(
+      file = basename(volcano_png),
+      label = paste("Volcano", contrast_nm),
+      section = "Results"
+    ),
+    list(
+      file = basename(expression_png),
+      label = paste("Expression", "PC 14:1_19:5"),
+      section = "Lipid Expression"
+    )
   )
 
   list(
@@ -258,8 +267,10 @@ testthat::test_that("generated report escapes all dynamic names (contrast, lipid
     }
 
     out_file <- testthat::expect_no_error(
-      rmarkdown::render(rmd_path, output_format = out_format,
-                        output_dir = report_dir, quiet = TRUE)
+      rmarkdown::render(rmd_path,
+        output_format = out_format,
+        output_dir = report_dir, quiet = TRUE
+      )
     )
 
     testthat::expect_true(file.exists(out_file))

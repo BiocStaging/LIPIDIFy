@@ -25,6 +25,26 @@
 # must keep using the original, unescaped value to index results (e.g.
 # diff_results$results[[nm]]); this function must only be applied at the
 # point where text is written into the Rmd content string.
+#' Surface a Caught Error to the User (internal)
+#'
+#' Shared error reporter for the Shiny server's \code{tryCatch()} handlers.
+#' The full condition message is shown, so an actionable failure -- e.g. a
+#' missing Bioconductor dependency for VSN normalization -- reaches the user
+#' verbatim instead of being swallowed or replaced by a fallback result.
+#' Defined at package level (rather than inline in the server) so that the
+#' handlers can be exercised in unit tests.
+#'
+#' @param e The caught condition.
+#' @param context Short label describing the operation that failed.
+#' @return \code{NULL}, invisibly. Called for its side effect.
+#' @noRd
+.show_error_notification <- function(e, context = "Operation") {
+  shiny::showNotification(
+    paste(context, "failed:", conditionMessage(e)),
+    type = "error", duration = 10
+  )
+}
+
 .escape_report_text <- function(x, output_format = "html") {
   if (is.null(x)) {
     return(x)
@@ -59,7 +79,7 @@
 #' @return A \code{tagList} containing the buttons and the checkbox group.
 #' @noRd
 .checkbox_group_with_buttons <- function(inputId, label, choices,
-                                        selected = NULL) {
+                                         selected = NULL) {
   btn_select_id <- paste0(inputId, "_select_all")
   btn_deselect_id <- paste0(inputId, "_deselect_all")
 
@@ -96,7 +116,7 @@
 #'   current set of choices.
 #' @noRd
 .register_select_all_observers <- function(session, input, inputId,
-                                          choices_reactive) {
+                                           choices_reactive) {
   btn_select_id <- paste0(inputId, "_select_all")
   btn_deselect_id <- paste0(inputId, "_deselect_all")
 
@@ -134,40 +154,165 @@
 #'   launch_lipidomics_app()
 #' }
 launch_lipidomics_app <- function(port = NULL) {
-  # ==========================================================================
-  # UI
-  # ==========================================================================
-  ui <- shinydashboard::dashboardPage(
-    shinydashboard::dashboardHeader(title = "LIPIDIFy"),
-    shinydashboard::dashboardSidebar(
-      shinydashboard::sidebarMenu(
-        shinydashboard::menuItem("Welcome", tabName = "welcome", icon = shiny::icon("info-circle")),
-        shinydashboard::menuItem("Data Upload", tabName = "upload", icon = shiny::icon("upload")),
-        shinydashboard::menuItem("Lipid Classification", tabName = "classification", icon = shiny::icon("tags")),
-        shinydashboard::menuItem("Raw Data Visualization", tabName = "raw_viz", icon = shiny::icon("chart-line")),
-        shinydashboard::menuItem("Normalization", tabName = "normalization", icon = shiny::icon("balance-scale")),
-        shinydashboard::menuItem("Preprocessing", tabName = "preprocessing", icon = shiny::icon("filter")),
-        shinydashboard::menuItem("Normalized Data Visualization", tabName = "norm_viz", icon = shiny::icon("chart-bar")),
-        shinydashboard::menuItem("Lipid Expression", tabName = "lipid_expression", icon = shiny::icon("flask")),
-        shinydashboard::menuItem("Differential Analysis", tabName = "diff_analysis", icon = shiny::icon("calculator")),
-        shinydashboard::menuItem("Results Visualization", tabName = "results_viz", icon = shiny::icon("chart-area")),
-        shinydashboard::menuItem("Enrichment Analysis", tabName = "enrichment", icon = shiny::icon("search-plus")),
-        shinydashboard::menuItem("Enrichment Visualization", tabName = "enrichment_viz", icon = shiny::icon("network-wired")),
-        shinydashboard::menuItem("Generate Report", tabName = "report", icon = shiny::icon("file-alt"))
+  ui <- .build_lipidify_ui()
+
+  server <- function(input, output, session) {
+    options(shiny.sanitize.errors = TRUE)
+
+    values <- shiny::reactiveValues(
+      raw_data = NULL,
+      imputed_data = NULL, # kept for legacy; use pre_impute_data
+      pre_impute_data = NULL, # normalized_data snapshot before imputation
+      normalized_data = NULL,
+      pre_batch_data = NULL, # normalized_data snapshot before batch correction
+      classification = NULL,
+      custom_classification = NULL,
+      use_custom_classification = FALSE,
+      classification_data = NULL,
+      diff_results = NULL,
+      available_contrasts = NULL,
+      custom_enrichment_sets = NULL,
+      enrichment_results = NULL,
+
+      # Single "current" plots (used for quick download)
+      current_plot = NULL,
+      current_raw_plot = NULL,
+      current_norm_plot = NULL,
+      current_results_plot = NULL,
+      current_enrichment_plot = NULL,
+      current_expression_plots = NULL,
+      current_pipeline_plots = NULL,
+      pipeline1_data = NULL,
+      pipeline2_data = NULL,
+      pipeline1_methods = NULL,
+      pipeline2_methods = NULL,
+
+      # Full plot history for the report
+      plot_history = list()
+    )
+
+    show_error <- .show_error_notification
+
+    add_to_history <- function(section, label, plot_obj) {
+      entry <- list(
+        section = section, label = label, plot = plot_obj,
+        time = Sys.time()
       )
-    ),
-    shinydashboard::dashboardBody(
-      shinydashboard::tabItems(
-        # ------------------------------------------------------------------
-        # Welcome
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "welcome",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Welcome to LIPIDIFy", status = "primary",
-              solidHeader = TRUE, width = 12,
-              shiny::HTML('
+      values$plot_history <- c(values$plot_history, list(entry))
+    }
+
+    .register_select_all_observers(
+      session, input, "metadata_cols",
+      function() c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)")
+    )
+    .register_select_all_observers(
+      session, input, "norm_methods_1",
+      function() get_normalization_methods()
+    )
+    .register_select_all_observers(
+      session, input, "norm_methods_2",
+      function() get_normalization_methods()
+    )
+    .register_select_all_observers(
+      session, input, "groups_included",
+      function() {
+        shiny::req(values$raw_data, input$group_column)
+        if (input$group_column %in% names(values$raw_data$metadata)) {
+          unique(values$raw_data$metadata[[input$group_column]])
+        } else {
+          character(0)
+        }
+      }
+    )
+    .register_select_all_observers(
+      session, input, "selected_samples",
+      function() {
+        shiny::req(values$raw_data)
+        if ("Sample Name" %in% names(values$raw_data$metadata)) {
+          values$raw_data$metadata$`Sample Name`
+        } else {
+          character(0)
+        }
+      }
+    )
+    .register_select_all_observers(
+      session, input, "selected_expression_groups",
+      function() {
+        shiny::req(values$raw_data)
+        gc <- if ("Sample Group" %in% names(values$raw_data$metadata)) {
+          "Sample Group"
+        } else {
+          names(values$raw_data$metadata)[1]
+        }
+        if (!is.null(values$raw_data$metadata[[gc]])) {
+          unique(values$raw_data$metadata[[gc]])
+        } else {
+          character(0)
+        }
+      }
+    )
+    .register_select_all_observers(
+      session, input, "report_sections",
+      function() c("data_summary", "normalization", "diff_analysis", "enrichment")
+    )
+    .register_select_all_observers(
+      session, input, "raw_filter_groups",
+      function() {
+        shiny::req(values$raw_data)
+        if ("Sample Group" %in% names(values$raw_data$metadata)) {
+          unique(values$raw_data$metadata$`Sample Group`)
+        } else {
+          character(0)
+        }
+      }
+    )
+    .register_select_all_observers(
+      session, input, "norm_filter_groups",
+      function() {
+        shiny::req(values$raw_data)
+        if ("Sample Group" %in% names(values$raw_data$metadata)) {
+          unique(values$raw_data$metadata$`Sample Group`)
+        } else {
+          character(0)
+        }
+      }
+    )
+
+    .setup_data_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_raw_viz_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_normalization_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_expression_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_diff_analysis_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_results_viz_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_enrichment_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_enrichment_viz_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_imputation_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_batch_correction_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_status_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_plot_download_handlers(input, output, session, values, show_error, add_to_history)
+    .setup_data_download_handlers(input, output, session, values, show_error, add_to_history)
+  } # end server
+
+  shiny::shinyApp(
+    ui = ui, server = server,
+    options = list(port = port)
+  )
+}
+
+# ===========================================================================
+# Shiny app: UI and server helper functions (split out of launch_lipidomics_app()
+# to keep individual function bodies manageable)
+# ===========================================================================
+
+#' @noRd
+.ui_tab_welcome <- function() {
+  shinydashboard::tabItem(
+    tabName = "welcome",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Welcome to LIPIDIFy", status = "primary",
+        solidHeader = TRUE, width = 12,
+        shiny::HTML('
 <style>
 /* ---- welcome page styles ---- */
 .lf-section  { margin-bottom: 28px; }
@@ -498,9 +643,15 @@ PC 18:0_22:6,Polyunsaturated_Species</div>
 </tr>
 <tr>
   <td><strong>VSN</strong></td>
-  <td>Variance Stabilizing Normalization (simplified): log2 transform + median centering. Stabilises variance that scales with intensity.</td>
-  <td>When low-abundance lipids have high variance</td>
+  <td>True Variance Stabilizing Normalization via the Bioconductor <code>vsn</code> package (<code>vsn::justvsn</code>). Fits an arcsinh/generalised-log transform by maximum likelihood, calibrating samples and stabilising mean-dependent variance. Needs <code>vsn</code> installed (<code>BiocManager::install("vsn")</code>), at least 2 samples and 42 lipids, and finite values (samples with fewer than two observed values are rejected); missing values stay missing, negatives are flagged. Output is already log-like - do not add Log2 after it.</td>
+  <td>Positive intensity-like data whose variance grows with the mean. Not a drop-in replacement for a log transform, and not automatically best for every dataset</td>
   <td><span class="lf-badge orange">Advanced</span></td>
+</tr>
+<tr>
+  <td><strong>Log2Median</strong></td>
+  <td>Log2 Median Centering - a <em>different, simpler</em> method than VSN: log2(x + 1) followed by per-sample median centering, back-transformed to the original scale. No parameters are estimated from the data.</td>
+  <td>A quick, dependency-free alternative when full VSN is not wanted</td>
+  <td><span class="lf-badge">Common</span></td>
 </tr>
 <tr>
   <td><strong>Median</strong></td>
@@ -587,1110 +738,1008 @@ Methods are applied left-to-right in the order you select them.
 </table>
 </div>
               ')
-            )
-          )
-        ),
-        # ------------------------------------------------------------------
-        # Data Upload
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "upload",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Upload Lipidomics Data", status = "primary",
-              solidHeader = TRUE, width = 6,
-              shiny::fileInput("file", "Choose CSV File", accept = ".csv"),
-              .checkbox_group_with_buttons(
-                "metadata_cols", "Metadata Columns:",
-                choices = c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)"),
-                selected = c("Sample Name", "Sample Group")
-              ),
-              shiny::actionButton("load_data", "Load Data", class = "btn-primary"),
-              shiny::br(), shiny::br(),
-              shiny::actionButton("load_example", "Load Example Data", class = "btn-info")
-            ),
-            shinydashboard::box(
-              title = "Data Summary", status = "info",
-              solidHeader = TRUE, width = 6,
-              shiny::verbatimTextOutput("data_summary"),
-              DT::dataTableOutput("data_preview")
-            )
-          )
-        ),
+      )
+    )
+  )
+}
 
-        # ------------------------------------------------------------------
-        # Classification
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "classification",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Lipid Classification", status = "primary",
-              solidHeader = TRUE, width = 6,
-              shiny::h4("Automatic Classification"),
-              shiny::p("Lipids are classified automatically from their names."),
-              shiny::actionLink("info_classification", " Help",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::br(), shiny::br(),
-              shiny::downloadButton("download_classification",
-                "Download Classification",
-                class = "btn-success"
-              ),
-              shiny::hr(),
-              shiny::h4("Upload Custom Classification"),
-              shiny::fileInput("custom_classification_file",
-                "Choose CSV File",
-                accept = ".csv"
-              ),
-              shiny::helpText("File must have a 'Lipid' column plus classification columns."),
-              shiny::actionButton("load_custom_classification",
-                "Load Custom Classification",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::actionButton("reset_classification",
-                "Reset to Automatic Classification",
-                class = "btn-warning",
-                icon  = shiny::icon("undo")
-              )
-            ),
-            shinydashboard::box(
-              title = "Current Classification", status = "info",
-              solidHeader = TRUE, width = 6,
-              DT::dataTableOutput("classification_table")
-            )
-          )
+#' @noRd
+.ui_tab_upload <- function() {
+  shinydashboard::tabItem(
+    tabName = "upload",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Upload Lipidomics Data", status = "primary",
+        solidHeader = TRUE, width = 6,
+        shiny::fileInput("file", "Choose CSV File", accept = ".csv"),
+        .checkbox_group_with_buttons(
+          "metadata_cols", "Metadata Columns:",
+          choices = c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)"),
+          selected = c("Sample Name", "Sample Group")
         ),
+        shiny::actionButton("load_data", "Load Data", class = "btn-primary"),
+        shiny::br(), shiny::br(),
+        shiny::actionButton("load_example", "Load Example Data", class = "btn-info")
+      ),
+      shinydashboard::box(
+        title = "Data Summary", status = "info",
+        solidHeader = TRUE, width = 6,
+        shiny::verbatimTextOutput("data_summary"),
+        DT::dataTableOutput("data_preview")
+      )
+    )
+  )
+}
 
-        # ------------------------------------------------------------------
-        # Raw Data Visualization
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "raw_viz",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Raw Data Visualization Options", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::radioButtons("view_mode", "View Mode:",
-                choices = c(
-                  "By Sample" = "sample",
-                  "By Lipid" = "lipid"
-                ),
-                selected = "sample"
-              ),
-              shiny::selectInput("plot_type", "Plot Type:",
-                choices = c(
-                  "Boxplot"   = "boxplot",
-                  "Violin"    = "violin",
-                  "Density"   = "density",
-                  "Histogram" = "histogram",
-                  "Heatmap"   = "heatmap"
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.plot_type == 'heatmap'",
-                shiny::numericInput("raw_heatmap_top_n",
-                  "Top N Variable Lipids:",
-                  value = 50, min = 10, max = 200
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.view_mode == 'lipid'",
-                shiny::numericInput("top_n_lipids", "Top N Variable Lipids:",
-                  value = 30, min = 5, max = 200
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.view_mode == 'sample'",
-                shiny::checkboxInput("limit_top_samples",
-                  "Limit to top N samples", value = FALSE
-                ),
-                shiny::conditionalPanel(
-                  condition = "input.limit_top_samples == true",
-                  shiny::numericInput("top_n_samples", "Top N Variable Samples:",
-                    value = 30, min = 2, max = 1000
-                  )
-                )
-              ),
-              shiny::hr(),
-              shiny::h5("Filter and Colour:"),
-              .checkbox_group_with_buttons(
-                "raw_filter_groups", "Show Groups Only:",
-                choices = NULL, selected = NULL
-              ),
-              shiny::checkboxInput("raw_color_by_group",
-                "Colour by Sample Group",
-                value = TRUE
-              ),
-              shiny::actionButton("create_raw_plot", "Create Plot",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::selectInput(
-                "img_format_raw", "Image Format:",
-                c("PNG" = "png", "PDF" = "pdf")
-              ),
-              shiny::downloadButton("download_raw_plot", "Download Plot",
-                class = "btn-success"
-              )
-            ),
-            shinydashboard::box(
-              title = "Raw Data Visualization", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::uiOutput("raw_plot_ui")
-            )
-          )
+#' @noRd
+.ui_tab_classification <- function() {
+  shinydashboard::tabItem(
+    tabName = "classification",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Lipid Classification", status = "primary",
+        solidHeader = TRUE, width = 6,
+        shiny::h4("Automatic Classification"),
+        shiny::p("Lipids are classified automatically from their names."),
+        shiny::actionLink("info_classification", " Help",
+          icon = shiny::icon("info-circle")
         ),
-
-        # ------------------------------------------------------------------
-        # Normalization
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "normalization",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Normalization Pipeline Builder", status = "primary",
-              solidHeader = TRUE, width = 4,
-
-              # Help button
-              shiny::actionLink("info_norm_methods", " Normalization Method Descriptions",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::hr(),
-              shiny::h4("Pipeline 1:"),
-              .checkbox_group_with_buttons(
-                "norm_methods_1", "Select Methods (applied in order):",
-                choices = get_normalization_methods(),
-                selected = c("TIC", "Log2")
-              ),
-              shiny::h4("Pipeline 2 (for comparison):"),
-              .checkbox_group_with_buttons(
-                "norm_methods_2", "Select Methods (applied in order):",
-                choices = get_normalization_methods(),
-                selected = "PQN"
-              ),
-              shiny::hr(),
-              shiny::h4("Comparison Plot Options"),
-              shiny::selectInput("norm_compare_plot_type",
-                "Plot Type:",
-                choices = c(
-                  "Boxplot" = "boxplot",
-                  "Violin" = "violin",
-                  "Density" = "density"
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.norm_compare_plot_type != 'density'",
-                shiny::radioButtons("norm_compare_view_mode", "View By:",
-                  choices = c("By Sample" = "sample", "By Lipid" = "lipid"),
-                  selected = "sample", inline = TRUE
-                ),
-                shiny::checkboxInput("norm_compare_limit_top",
-                  "Limit to top N (most variable)", value = FALSE
-                ),
-                shiny::conditionalPanel(
-                  condition = "input.norm_compare_limit_top == true",
-                  shiny::numericInput("norm_compare_top_n", "Top N:",
-                    value = 30, min = 2, max = 1000
-                  )
-                )
-              ),
-              shiny::checkboxInput("norm_color_by_group",
-                "Colour boxes by Sample Group",
-                value = TRUE
-              ),
-              shiny::actionButton("compare_pipelines", "Compare Pipelines",
-                class = "btn-info"
-              ),
-              shiny::hr(),
-              shiny::selectInput("chosen_pipeline",
-                "Apply Pipeline:",
-                choices = c(
-                  "Pipeline 1" = "1",
-                  "Pipeline 2" = "2"
-                )
-              ),
-              shiny::actionButton("apply_normalization",
-                "Apply Selected Pipeline",
-                class = "btn-primary"
-              )
-            ),
-            shinydashboard::box(
-              title = "Pipeline Comparison", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::plotOutput("pipeline_comparison", height = "650px"),
-              shiny::br(),
-              shiny::selectInput(
-                "img_format_pipeline", "Image Format:",
-                c("PNG" = "png", "PDF" = "pdf")
-              ),
-              shiny::downloadButton("download_pipeline_comparison",
-                "Download Comparison",
-                class = "btn-success"
-              )
-            )
-          )
+        shiny::br(), shiny::br(),
+        shiny::downloadButton("download_classification",
+          "Download Classification",
+          class = "btn-success"
         ),
+        shiny::hr(),
+        shiny::h4("Upload Custom Classification"),
+        shiny::fileInput("custom_classification_file",
+          "Choose CSV File",
+          accept = ".csv"
+        ),
+        shiny::helpText("File must have a 'Lipid' column plus classification columns."),
+        shiny::actionButton("load_custom_classification",
+          "Load Custom Classification",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::actionButton("reset_classification",
+          "Reset to Automatic Classification",
+          class = "btn-warning",
+          icon  = shiny::icon("undo")
+        )
+      ),
+      shinydashboard::box(
+        title = "Current Classification", status = "info",
+        solidHeader = TRUE, width = 6,
+        DT::dataTableOutput("classification_table")
+      )
+    )
+  )
+}
 
-        # ------------------------------------------------------------------
-        # Preprocessing (Imputation + Batch correction) - applied post-normalisation
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "preprocessing",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Missing Value Imputation", status = "primary",
-              solidHeader = TRUE, width = 6,
-              shiny::p(
-                "Replace missing values (NA) in the ", shiny::strong("normalised"),
-                " data. Imputing after normalisation ensures imputed values ",
-                "are on the same scale as observed values."
-              ),
-              shiny::verbatimTextOutput("missing_value_summary"),
-              shiny::hr(),
-              shiny::selectInput(
-                "imputation_method", "Imputation Method:",
-                choices = get_imputation_methods(),
-                selected = "half_min"
-              ),
-              shiny::conditionalPanel(
-                condition = "input.imputation_method == 'knn'",
-                shiny::numericInput("imputation_k",
-                  "Number of Neighbours (k):",
-                  value = 5L, min = 2L, max = 20L
-                )
-              ),
-              shiny::actionLink("info_imputation", " Method Descriptions",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::br(), shiny::br(),
-              shiny::actionButton("run_imputation", "Apply Imputation",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::actionButton("reset_imputation",
-                "Reset to Pre-Imputation Data",
-                class  = "btn-warning",
-                icon   = shiny::icon("undo")
-              )
-            ),
-            shinydashboard::box(
-              title = "Batch Effect Correction", status = "primary",
-              solidHeader = TRUE, width = 6,
-              shiny::p(
-                "Remove known technical batch effects while preserving ",
-                "biological signal."
-              ),
-              shiny::helpText(
-                "Requires a dedicated batch column in your metadata ",
-                "(e.g. 'Run', 'Plate', 'Batch'). If your CSV only has ",
-                "'Sample Name' and 'Sample Group', add a batch column ",
-                "and reload the data before using this feature."
-              ),
-              shiny::selectInput("batch_column",
-                "Batch Column in Metadata:", choices = NULL
-              ),
-              shiny::selectInput("batch_method", "Method:",
-                choices = c(
-                  "limma - removeBatchEffect (recommended)" = "limma",
-                  "ComBat - sva package (robust for large effects)"  = "combat"
-                )
-              ),
-              shiny::selectInput("batch_group_column",
-                "Group Column to Protect:", choices = NULL
-              ),
-              shiny::actionLink("info_batch", " Batch Correction Help",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::br(), shiny::br(),
-              shiny::actionButton("run_batch_correction",
-                "Apply Batch Correction",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::actionButton("reset_batch_correction",
-                "Reset to Pre-Batch Data",
-                class = "btn-warning",
-                icon  = shiny::icon("undo")
-              )
-            )
+#' @noRd
+.ui_tab_raw_viz <- function() {
+  shinydashboard::tabItem(
+    tabName = "raw_viz",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Raw Data Visualization Options", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::radioButtons("view_mode", "View Mode:",
+          choices = c(
+            "By Sample" = "sample",
+            "By Lipid" = "lipid"
           ),
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Preprocessing Status", status = "info",
-              solidHeader = TRUE, width = 12,
-              shiny::verbatimTextOutput("preprocessing_status")
+          selected = "sample"
+        ),
+        shiny::selectInput("plot_type", "Plot Type:",
+          choices = c(
+            "Boxplot"   = "boxplot",
+            "Violin"    = "violin",
+            "Density"   = "density",
+            "Histogram" = "histogram",
+            "Heatmap"   = "heatmap"
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.plot_type == 'heatmap'",
+          shiny::numericInput("raw_heatmap_top_n",
+            "Top N Variable Lipids:",
+            value = 50, min = 10, max = 200
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.view_mode == 'lipid'",
+          shiny::numericInput("top_n_lipids", "Top N Variable Lipids:",
+            value = 30, min = 5, max = 200
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.view_mode == 'sample'",
+          shiny::checkboxInput("limit_top_samples",
+            "Limit to top N samples",
+            value = FALSE
+          ),
+          shiny::conditionalPanel(
+            condition = "input.limit_top_samples == true",
+            shiny::numericInput("top_n_samples", "Top N Variable Samples:",
+              value = 30, min = 2, max = 1000
             )
           )
         ),
-
-        # ------------------------------------------------------------------
-        # Normalized Data Visualization
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "norm_viz",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Normalized Data Visualization", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::selectInput("norm_plot_type", "Plot Type:",
-                choices = c(
-                  "Boxplot" = "boxplot",
-                  "Violin"  = "violin",
-                  "Density" = "density",
-                  "Heatmap" = "heatmap",
-                  "PCA"     = "pca",
-                  "PLS-DA"  = "plsda"
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.norm_plot_type == 'heatmap'",
-                shiny::numericInput("norm_heatmap_top_n",
-                  "Top N Variable Lipids:",
-                  value = 50, min = 10, max = 200
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = paste0(
-                  "input.norm_plot_type == 'boxplot' || ",
-                  "input.norm_plot_type == 'violin' || ",
-                  "input.norm_plot_type == 'density'"
-                ),
-                shiny::checkboxInput("norm_limit_top_samples",
-                  "Limit to top N samples", value = FALSE
-                ),
-                shiny::conditionalPanel(
-                  condition = "input.norm_limit_top_samples == true",
-                  shiny::numericInput("norm_top_n_samples",
-                    "Top N Variable Samples:",
-                    value = 30, min = 2, max = 1000
-                  )
-                )
-              ),
-              shiny::hr(),
-              shiny::h5("Filter Samples:"),
-              .checkbox_group_with_buttons(
-                "norm_filter_groups", "Show Groups:",
-                choices = NULL, selected = NULL
-              ),
-              shiny::checkboxInput("norm_color_by_group_viz",
-                "Colour by Sample Group",
-                value = TRUE
-              ),
-              shiny::conditionalPanel(
-                condition = "input.norm_plot_type == 'pca' || input.norm_plot_type == 'plsda'",
-                shiny::selectInput("group_column", "Group Column:", choices = NULL),
-                shiny::actionLink("info_ellipses", " Ellipse Help",
-                  icon = shiny::icon("info-circle")
-                ),
-                .checkbox_group_with_buttons(
-                  "groups_included", "Include Groups:",
-                  choices = NULL, selected = NULL
-                ),
-                shiny::radioButtons("ellipse_type", "Ellipse Type:",
-                  choices = c(
-                    "None" = "none",
-                    "Confidence Ellipse" = "confidence",
-                    "Visual Circle" = "visual"
-                  ),
-                  selected = "none"
-                ),
-                shiny::checkboxInput("show_sample_labels",
-                  "Show Sample Labels",
-                  value = FALSE
-                )
-              ),
-              shiny::actionButton("create_norm_plot", "Create Plot",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::selectInput(
-                "img_format_norm", "Image Format:",
-                c("PNG" = "png", "PDF" = "pdf")
-              ),
-              shiny::downloadButton("download_norm_plot", "Download Plot",
-                class = "btn-success"
-              )
-            ),
-            shinydashboard::box(
-              title = "Normalized Data Plot", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::uiOutput("norm_plot_ui")
-            )
-          )
+        shiny::hr(),
+        shiny::h5("Filter and Colour:"),
+        .checkbox_group_with_buttons(
+          "raw_filter_groups", "Show Groups Only:",
+          choices = NULL, selected = NULL
         ),
-
-        # ------------------------------------------------------------------
-        # Lipid Expression
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "lipid_expression",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Lipid Expression Settings", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::selectizeInput("selected_lipids", "Select Lipids:",
-                choices = NULL, multiple = TRUE,
-                options = list(
-                  maxItems = 10,
-                  placeholder = "Search for lipids..."
-                )
-              ),
-              shiny::radioButtons("expression_selection_mode", "Select by:",
-                choices = c(
-                  "Samples" = "samples",
-                  "Groups" = "groups"
-                ),
-                selected = "groups"
-              ),
-              shiny::conditionalPanel(
-                condition = "input.expression_selection_mode == 'samples'",
-                .checkbox_group_with_buttons(
-                  "selected_samples", "Select Samples:",
-                  choices = NULL, selected = NULL
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.expression_selection_mode == 'groups'",
-                .checkbox_group_with_buttons(
-                  "selected_expression_groups", "Select Groups:",
-                  choices = NULL, selected = NULL
-                )
-              ),
-              shiny::radioButtons("expression_data_type", "Data Type:",
-                choices  = c("Raw" = "raw", "Normalized" = "normalized"),
-                selected = "normalized"
-              ),
-              shiny::actionButton("create_expression_plot", "Create Plots",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::selectInput(
-                "img_format_expression", "Image Format:",
-                c("PNG" = "png", "PDF" = "pdf")
-              ),
-              shiny::downloadButton("download_expression_plots",
-                "Download Plots",
-                class = "btn-success"
-              )
-            ),
-            shinydashboard::box(
-              title = "Lipid Expression Plots", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::uiOutput("expression_plots_ui")
-            )
-          )
+        shiny::checkboxInput("raw_color_by_group",
+          "Colour by Sample Group",
+          value = TRUE
         ),
-
-        # ------------------------------------------------------------------
-        # Differential Analysis
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "diff_analysis",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Differential Analysis Settings", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::selectInput("group_col_diff", "Group Column:", choices = NULL),
-              shiny::hr(),
-              shiny::h4("Analysis Method"),
-              shiny::radioButtons("diff_method", "Select Method:",
-                choices  = c("limma" = "limma", "EdgeR" = "edger"),
-                selected = "limma"
-              ),
-              shiny::actionLink("info_methods", " Method Help",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::hr(),
-              shiny::h4("Select Contrasts"),
-              shiny::actionLink("info_contrasts", " Contrast Help",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::uiOutput("contrast_selection_ui"),
-              shiny::hr(),
-              shiny::h4("Custom Contrasts"),
-              shiny::helpText(
-                "Enter one contrast per line using limma notation. ",
-                "Use this for complex comparisons such as collapsing groups:"
-              ),
-              shiny::tags$pre(
-                style = "font-size:11px; background:#f5f5f5; padding:6px; border-radius:4px;",
-                "(GroupA + GroupB)/2 - (GroupC + GroupD)/2"
-              ),
-              shiny::textAreaInput(
-                "custom_contrasts_text",
-                label    = NULL,
-                value    = "",
-                rows     = 3,
-                placeholder = "e.g.\n(ND_Vehicle + ND_DabTram)/2 - (HFD_Vehicle + HFD_DabTram)/2"
-              ),
-              shiny::hr(),
-              shiny::actionButton("run_diff_analysis", "Run Analysis",
-                class = "btn-primary"
-              )
-            ),
-            shinydashboard::box(
-              title = "Analysis Summary", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::verbatimTextOutput("diff_summary"),
-              shiny::hr(),
-              shiny::selectInput("contrast_display",
-                "Select Contrast to Display:",
-                choices = NULL
-              ),
-              DT::dataTableOutput("diff_results_table"),
-              shiny::br(),
-              shiny::downloadButton("download_current_table",
-                "Download Current Table (CSV)",
-                class = "btn-info"
-              ),
-              shiny::downloadButton("download_results",
-                "Download All Results (Excel)",
-                class = "btn-success"
-              )
-            )
-          )
+        shiny::actionButton("create_raw_plot", "Create Plot",
+          class = "btn-primary"
         ),
-
-        # ------------------------------------------------------------------
-        # Results Visualization
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "results_viz",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Visualization Options", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::selectInput("contrast_select", "Select Contrast:", choices = NULL),
-              shiny::selectInput("viz_type", "Visualization Type:",
-                choices = c(
-                  "Volcano Plot" = "volcano",
-                  "Heatmap" = "heatmap"
-                )
-              ),
-              shiny::conditionalPanel(
-                condition = "input.viz_type == 'volcano'",
-                shiny::numericInput("logfc_threshold", "LogFC Threshold:",
-                  value = 1, min = 0, step = 0.1
-                ),
-                shiny::numericInput("pval_threshold", "P-value Threshold:",
-                  value = 0.05, min = 0, max = 1, step = 0.01
-                ),
-                shiny::numericInput("top_labels", "Top N Labels:",
-                  value = 15, min = 0, max = 50
-                ),
-                shiny::checkboxInput("color_by_class",
-                  "Color Significant by Classification",
-                  value = FALSE
-                ),
-                shiny::conditionalPanel(
-                  condition = "input.color_by_class",
-                  shiny::selectInput("color_column", "Color by:",
-                    choices = c("LipidGroup", "LipidType", "Saturation")
-                  )
-                )
-                # Note: choices are updated dynamically in the server when
-                # classification data changes (handles custom classification columns)
-              ),
-              shiny::conditionalPanel(
-                condition = "input.viz_type == 'heatmap'",
-                shiny::numericInput("heatmap_top_n", "Top N Features:",
-                  value = 50, min = 10, max = 200
-                )
-              ),
-              shiny::actionButton("create_viz", "Create Visualization",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::selectInput(
-                "img_format_results", "Image Format:",
-                c("PNG" = "png", "PDF" = "pdf")
-              ),
-              shiny::downloadButton("download_viz", "Download Visualization",
-                class = "btn-success"
-              )
-            ),
-            shinydashboard::box(
-              title = "Results Visualization", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::plotOutput("results_plot", height = "600px")
-            )
-          )
+        shiny::br(), shiny::br(),
+        shiny::selectInput(
+          "img_format_raw", "Image Format:",
+          c("PNG" = "png", "PDF" = "pdf")
         ),
-
-        # ------------------------------------------------------------------
-        # Enrichment Analysis
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "enrichment",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Enrichment Analysis Settings", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::selectInput("enrichment_contrast_select",
-                "Select Contrast:",
-                choices = NULL
-              ),
-              shiny::hr(),
-              shiny::h4("Custom Enrichment Sets"),
-              shiny::fileInput("custom_enrichment_file",
-                "Upload Custom Sets CSV",
-                accept = ".csv"
-              ),
-              shiny::helpText("CSV with columns: Lipid, Set_Name"),
-              shiny::actionLink("info_custom_sets", " Help",
-                icon = shiny::icon("info-circle")
-              ),
-              shiny::actionButton("load_custom_sets", "Load Custom Sets",
-                class = "btn-primary"
-              ),
-              shiny::hr(),
-              shiny::numericInput("min_set_size", "Min Set Size:", value = 5, min = 2),
-              shiny::numericInput("max_set_size", "Max Set Size:", value = 500, min = 10),
-              shiny::actionButton("run_enrichment", "Run Enrichment",
-                class = "btn-primary"
-              )
-            ),
-            shinydashboard::box(
-              title = "Enrichment Results", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::selectInput("enrichment_contrast",
-                "Display Contrast:",
-                choices = NULL
-              ),
-              shiny::selectInput("enrichment_type", "Enrichment Type:",
-                choices = c(
-                  "Saturation" = "Saturation",
-                  "Lipid Group" = "LipidGroup",
-                  "Lipid Type" = "LipidType"
-                )
-              ),
-              DT::dataTableOutput("enrichment_results_table"),
-              shiny::downloadButton("download_enrichment",
-                "Download Results",
-                class = "btn-success"
-              )
-            )
-          )
-        ),
-
-        # ------------------------------------------------------------------
-        # Enrichment Visualization
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "enrichment_viz",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Enrichment Visualization Options", status = "primary",
-              solidHeader = TRUE, width = 4,
-              shiny::selectInput("enrichment_viz_contrast",
-                "Select Contrast:",
-                choices = NULL
-              ),
-              shiny::selectInput("enrichment_viz_type", "Enrichment Type:",
-                choices = c(
-                  "Saturation" = "Saturation",
-                  "Lipid Group" = "LipidGroup",
-                  "Lipid Type" = "LipidType"
-                )
-              ),
-              shiny::selectInput("enrichment_plot_type", "Plot Type:",
-                choices = c(
-                  "Dot Plot" = "dotplot",
-                  "Bar Plot" = "barplot"
-                )
-              ),
-              shiny::numericInput("max_pathways", "Max Pathways to Show:",
-                value = 15, min = 5, max = 30
-              ),
-              shiny::actionButton("create_enrichment_viz",
-                "Create Visualization",
-                class = "btn-primary"
-              ),
-              shiny::br(), shiny::br(),
-              shiny::selectInput(
-                "img_format_enrich", "Image Format:",
-                c("PNG" = "png", "PDF" = "pdf")
-              ),
-              shiny::downloadButton("download_enrichment_viz",
-                "Download Plot",
-                class = "btn-success"
-              )
-            ),
-            shinydashboard::box(
-              title = "Enrichment Visualization", status = "info",
-              solidHeader = TRUE, width = 8,
-              shiny::plotOutput("enrichment_plot", height = "600px")
-            )
-          )
-        ),
-
-        # ------------------------------------------------------------------
-        # Report Generation
-        # ------------------------------------------------------------------
-        shinydashboard::tabItem(
-          tabName = "report",
-          shiny::fluidRow(
-            shinydashboard::box(
-              title = "Generate Analysis Report", status = "primary",
-              solidHeader = TRUE, width = 6,
-              shiny::textInput("report_title", "Report Title:",
-                value = "Lipidomics Analysis Report"
-              ),
-              shiny::textInput("report_author", "Author:", value = ""),
-              shiny::hr(),
-              shiny::h4("Include Sections"),
-              .checkbox_group_with_buttons(
-                "report_sections", "Sections to include:",
-                choices = c(
-                  "Data Summary" = "data_summary",
-                  "Normalization" = "normalization",
-                  "Differential Analysis" = "diff_analysis",
-                  "Enrichment Analysis" = "enrichment"
-                ),
-                selected = c(
-                  "data_summary", "normalization",
-                  "diff_analysis", "enrichment"
-                )
-              ),
-              shiny::hr(),
-              shiny::h4("Plot History"),
-              shiny::verbatimTextOutput("plot_history_status"),
-              shiny::hr(),
-              shiny::h4("Output Format"),
-              shiny::radioButtons("report_format", "Choose format:",
-                choices  = c("HTML" = "html", "PDF" = "pdf"),
-                selected = "html"
-              ),
-              shiny::helpText("Note: PDF requires LaTeX (tinytex). If PDF fails, use HTML."),
-              shiny::br(),
-              shiny::downloadButton("download_report",
-                "Generate & Download Report",
-                class = "btn-primary btn-lg"
-              )
-            ),
-            shinydashboard::box(
-              title = "Analysis Status", status = "info",
-              solidHeader = TRUE, width = 6,
-              shiny::verbatimTextOutput("report_status")
-            )
-          )
+        shiny::downloadButton("download_raw_plot", "Download Plot",
+          class = "btn-success"
         )
-      ) # end tabItems
-    ) # end dashboardBody
-  ) # end dashboardPage
-
-  # ==========================================================================
-  # Server
-  # ==========================================================================
-  server <- function(input, output, session) {
-    options(shiny.sanitize.errors = TRUE)
-
-    # ---- Reactive state ---------------------------------------------------
-    values <- shiny::reactiveValues(
-      raw_data = NULL,
-      imputed_data = NULL,          # kept for legacy; use pre_impute_data
-      pre_impute_data = NULL,       # normalized_data snapshot before imputation
-      normalized_data = NULL,
-      pre_batch_data = NULL,        # normalized_data snapshot before batch correction
-      classification = NULL,
-      custom_classification = NULL,
-      use_custom_classification = FALSE,
-      classification_data = NULL,
-      diff_results = NULL,
-      available_contrasts = NULL,
-      custom_enrichment_sets = NULL,
-      enrichment_results = NULL,
-
-      # Single "current" plots (used for quick download)
-      current_plot = NULL,
-      current_raw_plot = NULL,
-      current_norm_plot = NULL,
-      current_results_plot = NULL,
-      current_enrichment_plot = NULL,
-      current_expression_plots = NULL,
-      current_pipeline_plots = NULL,
-      pipeline1_data = NULL,
-      pipeline2_data = NULL,
-      pipeline1_methods = NULL,
-      pipeline2_methods = NULL,
-
-      # Full plot history for the report
-      plot_history = list()
-    )
-
-    # Convenience: show an error notification
-    show_error <- function(e, context = "Operation") {
-      shiny::showNotification(
-        paste(context, "failed:", conditionMessage(e)),
-        type = "error", duration = 10
+      ),
+      shinydashboard::box(
+        title = "Raw Data Visualization", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::uiOutput("raw_plot_ui")
       )
-    }
+    )
+  )
+}
 
-    # Convenience: append a plot to the history list
-    add_to_history <- function(section, label, plot_obj) {
-      entry <- list(
-        section = section, label = label, plot = plot_obj,
-        time = Sys.time()
+#' @noRd
+.ui_tab_normalization <- function() {
+  shinydashboard::tabItem(
+    tabName = "normalization",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Normalization Pipeline Builder", status = "primary",
+        solidHeader = TRUE, width = 4,
+
+        # Help button
+        shiny::actionLink("info_norm_methods", " Normalization Method Descriptions",
+          icon = shiny::icon("info-circle")
+        ),
+        shiny::hr(),
+        shiny::h4("Pipeline 1:"),
+        .checkbox_group_with_buttons(
+          "norm_methods_1", "Select Methods (applied in order):",
+          choices = get_normalization_methods(),
+          selected = c("TIC", "Log2")
+        ),
+        shiny::h4("Pipeline 2 (for comparison):"),
+        .checkbox_group_with_buttons(
+          "norm_methods_2", "Select Methods (applied in order):",
+          choices = get_normalization_methods(),
+          selected = "PQN"
+        ),
+        shiny::hr(),
+        shiny::h4("Comparison Plot Options"),
+        shiny::selectInput("norm_compare_plot_type",
+          "Plot Type:",
+          choices = c(
+            "Boxplot" = "boxplot",
+            "Violin" = "violin",
+            "Density" = "density"
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.norm_compare_plot_type != 'density'",
+          shiny::radioButtons("norm_compare_view_mode", "View By:",
+            choices = c("By Sample" = "sample", "By Lipid" = "lipid"),
+            selected = "sample", inline = TRUE
+          ),
+          shiny::checkboxInput("norm_compare_limit_top",
+            "Limit to top N (most variable)",
+            value = FALSE
+          ),
+          shiny::conditionalPanel(
+            condition = "input.norm_compare_limit_top == true",
+            shiny::numericInput("norm_compare_top_n", "Top N:",
+              value = 30, min = 2, max = 1000
+            )
+          )
+        ),
+        shiny::checkboxInput("norm_color_by_group",
+          "Colour boxes by Sample Group",
+          value = TRUE
+        ),
+        shiny::actionButton("compare_pipelines", "Compare Pipelines",
+          class = "btn-info"
+        ),
+        shiny::hr(),
+        shiny::selectInput("chosen_pipeline",
+          "Apply Pipeline:",
+          choices = c(
+            "Pipeline 1" = "1",
+            "Pipeline 2" = "2"
+          )
+        ),
+        shiny::actionButton("apply_normalization",
+          "Apply Selected Pipeline",
+          class = "btn-primary"
+        )
+      ),
+      shinydashboard::box(
+        title = "Pipeline Comparison", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::plotOutput("pipeline_comparison", height = "650px"),
+        shiny::br(),
+        shiny::selectInput(
+          "img_format_pipeline", "Image Format:",
+          c("PNG" = "png", "PDF" = "pdf")
+        ),
+        shiny::downloadButton("download_pipeline_comparison",
+          "Download Comparison",
+          class = "btn-success"
+        )
       )
-      values$plot_history <- c(values$plot_history, list(entry))
-    }
+    )
+  )
+}
 
-    # ---- Select All / Deselect All wiring --------------------------------
-    .register_select_all_observers(
-      session, input, "metadata_cols",
-      function() c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)")
+#' @noRd
+.ui_tab_preprocessing <- function() {
+  shinydashboard::tabItem(
+    tabName = "preprocessing",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Missing Value Imputation", status = "primary",
+        solidHeader = TRUE, width = 6,
+        shiny::p(
+          "Replace missing values (NA) in the ", shiny::strong("normalised"),
+          " data. Imputing after normalisation ensures imputed values ",
+          "are on the same scale as observed values."
+        ),
+        shiny::verbatimTextOutput("missing_value_summary"),
+        shiny::hr(),
+        shiny::selectInput(
+          "imputation_method", "Imputation Method:",
+          choices = get_imputation_methods(),
+          selected = "half_min"
+        ),
+        shiny::conditionalPanel(
+          condition = "input.imputation_method == 'knn'",
+          shiny::numericInput("imputation_k",
+            "Number of Neighbours (k):",
+            value = 5L, min = 2L, max = 20L
+          )
+        ),
+        shiny::actionLink("info_imputation", " Method Descriptions",
+          icon = shiny::icon("info-circle")
+        ),
+        shiny::br(), shiny::br(),
+        shiny::actionButton("run_imputation", "Apply Imputation",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::actionButton("reset_imputation",
+          "Reset to Pre-Imputation Data",
+          class  = "btn-warning",
+          icon   = shiny::icon("undo")
+        )
+      ),
+      shinydashboard::box(
+        title = "Batch Effect Correction", status = "primary",
+        solidHeader = TRUE, width = 6,
+        shiny::p(
+          "Remove known technical batch effects while preserving ",
+          "biological signal."
+        ),
+        shiny::helpText(
+          "Requires a dedicated batch column in your metadata ",
+          "(e.g. 'Run', 'Plate', 'Batch'). If your CSV only has ",
+          "'Sample Name' and 'Sample Group', add a batch column ",
+          "and reload the data before using this feature."
+        ),
+        shiny::selectInput("batch_column",
+          "Batch Column in Metadata:",
+          choices = NULL
+        ),
+        shiny::selectInput("batch_method", "Method:",
+          choices = c(
+            "limma - removeBatchEffect (recommended)" = "limma",
+            "ComBat - sva package (robust for large effects)" = "combat"
+          )
+        ),
+        shiny::selectInput("batch_group_column",
+          "Group Column to Protect:",
+          choices = NULL
+        ),
+        shiny::actionLink("info_batch", " Batch Correction Help",
+          icon = shiny::icon("info-circle")
+        ),
+        shiny::br(), shiny::br(),
+        shiny::actionButton("run_batch_correction",
+          "Apply Batch Correction",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::actionButton("reset_batch_correction",
+          "Reset to Pre-Batch Data",
+          class = "btn-warning",
+          icon  = shiny::icon("undo")
+        )
+      )
+    ),
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Preprocessing Status", status = "info",
+        solidHeader = TRUE, width = 12,
+        shiny::verbatimTextOutput("preprocessing_status")
+      )
     )
-    .register_select_all_observers(
-      session, input, "norm_methods_1",
-      function() get_normalization_methods()
+  )
+}
+
+#' @noRd
+.ui_tab_norm_viz <- function() {
+  shinydashboard::tabItem(
+    tabName = "norm_viz",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Normalized Data Visualization", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::selectInput("norm_plot_type", "Plot Type:",
+          choices = c(
+            "Boxplot" = "boxplot",
+            "Violin"  = "violin",
+            "Density" = "density",
+            "Heatmap" = "heatmap",
+            "PCA"     = "pca",
+            "PLS-DA"  = "plsda"
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.norm_plot_type == 'heatmap'",
+          shiny::numericInput("norm_heatmap_top_n",
+            "Top N Variable Lipids:",
+            value = 50, min = 10, max = 200
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = paste0(
+            "input.norm_plot_type == 'boxplot' || ",
+            "input.norm_plot_type == 'violin' || ",
+            "input.norm_plot_type == 'density'"
+          ),
+          shiny::checkboxInput("norm_limit_top_samples",
+            "Limit to top N samples",
+            value = FALSE
+          ),
+          shiny::conditionalPanel(
+            condition = "input.norm_limit_top_samples == true",
+            shiny::numericInput("norm_top_n_samples",
+              "Top N Variable Samples:",
+              value = 30, min = 2, max = 1000
+            )
+          )
+        ),
+        shiny::hr(),
+        shiny::h5("Filter Samples:"),
+        .checkbox_group_with_buttons(
+          "norm_filter_groups", "Show Groups:",
+          choices = NULL, selected = NULL
+        ),
+        shiny::checkboxInput("norm_color_by_group_viz",
+          "Colour by Sample Group",
+          value = TRUE
+        ),
+        shiny::conditionalPanel(
+          condition = "input.norm_plot_type == 'pca' || input.norm_plot_type == 'plsda'",
+          shiny::selectInput("group_column", "Group Column:", choices = NULL),
+          shiny::actionLink("info_ellipses", " Ellipse Help",
+            icon = shiny::icon("info-circle")
+          ),
+          .checkbox_group_with_buttons(
+            "groups_included", "Include Groups:",
+            choices = NULL, selected = NULL
+          ),
+          shiny::radioButtons("ellipse_type", "Ellipse Type:",
+            choices = c(
+              "None" = "none",
+              "Confidence Ellipse" = "confidence",
+              "Visual Circle" = "visual"
+            ),
+            selected = "none"
+          ),
+          shiny::checkboxInput("show_sample_labels",
+            "Show Sample Labels",
+            value = FALSE
+          )
+        ),
+        shiny::actionButton("create_norm_plot", "Create Plot",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::selectInput(
+          "img_format_norm", "Image Format:",
+          c("PNG" = "png", "PDF" = "pdf")
+        ),
+        shiny::downloadButton("download_norm_plot", "Download Plot",
+          class = "btn-success"
+        )
+      ),
+      shinydashboard::box(
+        title = "Normalized Data Plot", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::uiOutput("norm_plot_ui")
+      )
     )
-    .register_select_all_observers(
-      session, input, "norm_methods_2",
-      function() get_normalization_methods()
+  )
+}
+
+#' @noRd
+.ui_tab_lipid_expression <- function() {
+  shinydashboard::tabItem(
+    tabName = "lipid_expression",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Lipid Expression Settings", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::selectizeInput("selected_lipids", "Select Lipids:",
+          choices = NULL, multiple = TRUE,
+          options = list(
+            maxItems = 10,
+            placeholder = "Search for lipids..."
+          )
+        ),
+        shiny::radioButtons("expression_selection_mode", "Select by:",
+          choices = c(
+            "Samples" = "samples",
+            "Groups" = "groups"
+          ),
+          selected = "groups"
+        ),
+        shiny::conditionalPanel(
+          condition = "input.expression_selection_mode == 'samples'",
+          .checkbox_group_with_buttons(
+            "selected_samples", "Select Samples:",
+            choices = NULL, selected = NULL
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.expression_selection_mode == 'groups'",
+          .checkbox_group_with_buttons(
+            "selected_expression_groups", "Select Groups:",
+            choices = NULL, selected = NULL
+          )
+        ),
+        shiny::radioButtons("expression_data_type", "Data Type:",
+          choices  = c("Raw" = "raw", "Normalized" = "normalized"),
+          selected = "normalized"
+        ),
+        shiny::actionButton("create_expression_plot", "Create Plots",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::selectInput(
+          "img_format_expression", "Image Format:",
+          c("PNG" = "png", "PDF" = "pdf")
+        ),
+        shiny::downloadButton("download_expression_plots",
+          "Download Plots",
+          class = "btn-success"
+        )
+      ),
+      shinydashboard::box(
+        title = "Lipid Expression Plots", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::uiOutput("expression_plots_ui")
+      )
     )
-    .register_select_all_observers(
-      session, input, "groups_included",
-      function() {
-        shiny::req(values$raw_data, input$group_column)
-        if (input$group_column %in% names(values$raw_data$metadata)) {
-          unique(values$raw_data$metadata[[input$group_column]])
-        } else {
-          character(0)
+  )
+}
+
+#' @noRd
+.ui_tab_diff_analysis <- function() {
+  shinydashboard::tabItem(
+    tabName = "diff_analysis",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Differential Analysis Settings", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::selectInput("group_col_diff", "Group Column:", choices = NULL),
+        shiny::hr(),
+        shiny::h4("Analysis Method"),
+        shiny::radioButtons("diff_method", "Select Method:",
+          choices  = c("limma" = "limma", "EdgeR" = "edger"),
+          selected = "limma"
+        ),
+        shiny::actionLink("info_methods", " Method Help",
+          icon = shiny::icon("info-circle")
+        ),
+        shiny::hr(),
+        shiny::h4("Select Contrasts"),
+        shiny::actionLink("info_contrasts", " Contrast Help",
+          icon = shiny::icon("info-circle")
+        ),
+        shiny::uiOutput("contrast_selection_ui"),
+        shiny::hr(),
+        shiny::h4("Custom Contrasts"),
+        shiny::helpText(
+          "Enter one contrast per line using limma notation. ",
+          "Use this for complex comparisons such as collapsing groups:"
+        ),
+        shiny::tags$pre(
+          style = "font-size:11px; background:#f5f5f5; padding:6px; border-radius:4px;",
+          "(GroupA + GroupB)/2 - (GroupC + GroupD)/2"
+        ),
+        shiny::textAreaInput(
+          "custom_contrasts_text",
+          label = NULL,
+          value = "",
+          rows = 3,
+          placeholder = "e.g.\n(ND_Vehicle + ND_DabTram)/2 - (HFD_Vehicle + HFD_DabTram)/2"
+        ),
+        shiny::hr(),
+        shiny::actionButton("run_diff_analysis", "Run Analysis",
+          class = "btn-primary"
+        )
+      ),
+      shinydashboard::box(
+        title = "Analysis Summary", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::verbatimTextOutput("diff_summary"),
+        shiny::hr(),
+        shiny::selectInput("contrast_display",
+          "Select Contrast to Display:",
+          choices = NULL
+        ),
+        DT::dataTableOutput("diff_results_table"),
+        shiny::br(),
+        shiny::downloadButton("download_current_table",
+          "Download Current Table (CSV)",
+          class = "btn-info"
+        ),
+        shiny::downloadButton("download_results",
+          "Download All Results (Excel)",
+          class = "btn-success"
+        )
+      )
+    )
+  )
+}
+
+#' @noRd
+.ui_tab_results_viz <- function() {
+  shinydashboard::tabItem(
+    tabName = "results_viz",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Visualization Options", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::selectInput("contrast_select", "Select Contrast:", choices = NULL),
+        shiny::selectInput("viz_type", "Visualization Type:",
+          choices = c(
+            "Volcano Plot" = "volcano",
+            "Heatmap" = "heatmap"
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.viz_type == 'volcano'",
+          shiny::numericInput("logfc_threshold", "LogFC Threshold:",
+            value = 1, min = 0, step = 0.1
+          ),
+          shiny::numericInput("pval_threshold", "P-value Threshold:",
+            value = 0.05, min = 0, max = 1, step = 0.01
+          ),
+          shiny::numericInput("top_labels", "Top N Labels:",
+            value = 15, min = 0, max = 50
+          ),
+          shiny::checkboxInput("color_by_class",
+            "Color Significant by Classification",
+            value = FALSE
+          ),
+          shiny::conditionalPanel(
+            condition = "input.color_by_class",
+            shiny::selectInput("color_column", "Color by:",
+              choices = c("LipidGroup", "LipidType", "Saturation")
+            )
+          )
+          # Note: choices are updated dynamically in the server when
+          # classification data changes (handles custom classification columns)
+        ),
+        shiny::conditionalPanel(
+          condition = "input.viz_type == 'heatmap'",
+          shiny::numericInput("heatmap_top_n", "Top N Features:",
+            value = 50, min = 10, max = 200
+          )
+        ),
+        shiny::actionButton("create_viz", "Create Visualization",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::selectInput(
+          "img_format_results", "Image Format:",
+          c("PNG" = "png", "PDF" = "pdf")
+        ),
+        shiny::downloadButton("download_viz", "Download Visualization",
+          class = "btn-success"
+        )
+      ),
+      shinydashboard::box(
+        title = "Results Visualization", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::plotOutput("results_plot", height = "600px")
+      )
+    )
+  )
+}
+
+#' @noRd
+.ui_tab_enrichment <- function() {
+  shinydashboard::tabItem(
+    tabName = "enrichment",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Enrichment Analysis Settings", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::selectInput("enrichment_contrast_select",
+          "Select Contrast:",
+          choices = NULL
+        ),
+        shiny::hr(),
+        shiny::h4("Custom Enrichment Sets"),
+        shiny::fileInput("custom_enrichment_file",
+          "Upload Custom Sets CSV",
+          accept = ".csv"
+        ),
+        shiny::helpText("CSV with columns: Lipid, Set_Name"),
+        shiny::actionLink("info_custom_sets", " Help",
+          icon = shiny::icon("info-circle")
+        ),
+        shiny::actionButton("load_custom_sets", "Load Custom Sets",
+          class = "btn-primary"
+        ),
+        shiny::hr(),
+        shiny::numericInput("min_set_size", "Min Set Size:", value = 5, min = 2),
+        shiny::numericInput("max_set_size", "Max Set Size:", value = 500, min = 10),
+        shiny::actionButton("run_enrichment", "Run Enrichment",
+          class = "btn-primary"
+        )
+      ),
+      shinydashboard::box(
+        title = "Enrichment Results", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::selectInput("enrichment_contrast",
+          "Display Contrast:",
+          choices = NULL
+        ),
+        shiny::selectInput("enrichment_type", "Enrichment Type:",
+          choices = c(
+            "Saturation" = "Saturation",
+            "Lipid Group" = "LipidGroup",
+            "Lipid Type" = "LipidType"
+          )
+        ),
+        DT::dataTableOutput("enrichment_results_table"),
+        shiny::downloadButton("download_enrichment",
+          "Download Results",
+          class = "btn-success"
+        )
+      )
+    )
+  )
+}
+
+#' @noRd
+.ui_tab_enrichment_viz <- function() {
+  shinydashboard::tabItem(
+    tabName = "enrichment_viz",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Enrichment Visualization Options", status = "primary",
+        solidHeader = TRUE, width = 4,
+        shiny::selectInput("enrichment_viz_contrast",
+          "Select Contrast:",
+          choices = NULL
+        ),
+        shiny::selectInput("enrichment_viz_type", "Enrichment Type:",
+          choices = c(
+            "Saturation" = "Saturation",
+            "Lipid Group" = "LipidGroup",
+            "Lipid Type" = "LipidType"
+          )
+        ),
+        shiny::selectInput("enrichment_plot_type", "Plot Type:",
+          choices = c(
+            "Dot Plot" = "dotplot",
+            "Bar Plot" = "barplot"
+          )
+        ),
+        shiny::numericInput("max_pathways", "Max Pathways to Show:",
+          value = 15, min = 5, max = 30
+        ),
+        shiny::actionButton("create_enrichment_viz",
+          "Create Visualization",
+          class = "btn-primary"
+        ),
+        shiny::br(), shiny::br(),
+        shiny::selectInput(
+          "img_format_enrich", "Image Format:",
+          c("PNG" = "png", "PDF" = "pdf")
+        ),
+        shiny::downloadButton("download_enrichment_viz",
+          "Download Plot",
+          class = "btn-success"
+        )
+      ),
+      shinydashboard::box(
+        title = "Enrichment Visualization", status = "info",
+        solidHeader = TRUE, width = 8,
+        shiny::plotOutput("enrichment_plot", height = "600px")
+      )
+    )
+  )
+}
+
+#' @noRd
+.ui_tab_report <- function() {
+  shinydashboard::tabItem(
+    tabName = "report",
+    shiny::fluidRow(
+      shinydashboard::box(
+        title = "Generate Analysis Report", status = "primary",
+        solidHeader = TRUE, width = 6,
+        shiny::textInput("report_title", "Report Title:",
+          value = "Lipidomics Analysis Report"
+        ),
+        shiny::textInput("report_author", "Author:", value = ""),
+        shiny::hr(),
+        shiny::h4("Include Sections"),
+        .checkbox_group_with_buttons(
+          "report_sections", "Sections to include:",
+          choices = c(
+            "Data Summary" = "data_summary",
+            "Normalization" = "normalization",
+            "Differential Analysis" = "diff_analysis",
+            "Enrichment Analysis" = "enrichment"
+          ),
+          selected = c(
+            "data_summary", "normalization",
+            "diff_analysis", "enrichment"
+          )
+        ),
+        shiny::hr(),
+        shiny::h4("Plot History"),
+        shiny::verbatimTextOutput("plot_history_status"),
+        shiny::hr(),
+        shiny::h4("Output Format"),
+        shiny::radioButtons("report_format", "Choose format:",
+          choices  = c("HTML" = "html", "PDF" = "pdf"),
+          selected = "html"
+        ),
+        shiny::helpText("Note: PDF requires LaTeX (tinytex). If PDF fails, use HTML."),
+        shiny::br(),
+        shiny::downloadButton("download_report",
+          "Generate & Download Report",
+          class = "btn-primary btn-lg"
+        )
+      ),
+      shinydashboard::box(
+        title = "Analysis Status", status = "info",
+        solidHeader = TRUE, width = 6,
+        shiny::verbatimTextOutput("report_status")
+      )
+    )
+  )
+}
+
+#' @noRd
+.build_lipidify_ui <- function() {
+  shinydashboard::dashboardPage(
+    shinydashboard::dashboardHeader(title = "LIPIDIFy"),
+    shinydashboard::dashboardSidebar(
+      shinydashboard::sidebarMenu(
+        shinydashboard::menuItem("Welcome", tabName = "welcome", icon = shiny::icon("info-circle")),
+        shinydashboard::menuItem("Data Upload", tabName = "upload", icon = shiny::icon("upload")),
+        shinydashboard::menuItem("Lipid Classification", tabName = "classification", icon = shiny::icon("tags")),
+        shinydashboard::menuItem("Raw Data Visualization", tabName = "raw_viz", icon = shiny::icon("chart-line")),
+        shinydashboard::menuItem("Normalization", tabName = "normalization", icon = shiny::icon("balance-scale")),
+        shinydashboard::menuItem("Preprocessing", tabName = "preprocessing", icon = shiny::icon("filter")),
+        shinydashboard::menuItem("Normalized Data Visualization", tabName = "norm_viz", icon = shiny::icon("chart-bar")),
+        shinydashboard::menuItem("Lipid Expression", tabName = "lipid_expression", icon = shiny::icon("flask")),
+        shinydashboard::menuItem("Differential Analysis", tabName = "diff_analysis", icon = shiny::icon("calculator")),
+        shinydashboard::menuItem("Results Visualization", tabName = "results_viz", icon = shiny::icon("chart-area")),
+        shinydashboard::menuItem("Enrichment Analysis", tabName = "enrichment", icon = shiny::icon("search-plus")),
+        shinydashboard::menuItem("Enrichment Visualization", tabName = "enrichment_viz", icon = shiny::icon("network-wired")),
+        shinydashboard::menuItem("Generate Report", tabName = "report", icon = shiny::icon("file-alt"))
+      )
+    ),
+    shinydashboard::dashboardBody(
+      shinydashboard::tabItems(
+        .ui_tab_welcome(),
+        .ui_tab_upload(),
+        .ui_tab_classification(),
+        .ui_tab_raw_viz(),
+        .ui_tab_normalization(),
+        .ui_tab_preprocessing(),
+        .ui_tab_norm_viz(),
+        .ui_tab_lipid_expression(),
+        .ui_tab_diff_analysis(),
+        .ui_tab_results_viz(),
+        .ui_tab_enrichment(),
+        .ui_tab_enrichment_viz(),
+        .ui_tab_report()
+      )
+    )
+  )
+}
+
+#' @noRd
+.setup_data_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$load_example, {
+    tryCatch(
+      {
+        example_data <- generate_example_data()
+        values$raw_data <- load_lipidomics_data_from_df(
+          example_data,
+          input$metadata_cols
+        )
+
+        if (!is.null(values$raw_data$metadata$`Sample Name`)) {
+          rownames(values$raw_data$numeric_data) <-
+            values$raw_data$metadata$`Sample Name`
+          rownames(values$raw_data$metadata) <-
+            values$raw_data$metadata$`Sample Name`
         }
-      }
+
+        lipid_names <- colnames(values$raw_data$numeric_data)
+        values$classification <- classify_lipids(lipid_names)
+        values$classification_data <- values$classification
+
+        .update_ui_after_load(session, values)
+        shiny::showNotification("Example data loaded successfully!")
+      },
+      error = function(e) show_error(e, "Loading example data")
     )
-    .register_select_all_observers(
-      session, input, "selected_samples",
-      function() {
-        shiny::req(values$raw_data)
+  })
+  shiny::observeEvent(input$load_data, {
+    shiny::req(input$file)
+    tryCatch(
+      {
+        loaded <- load_lipidomics_data(
+          input$file$datapath,
+          input$metadata_cols
+        )
+        values$raw_data <- list(
+          data         = loaded$data,
+          metadata     = loaded$metadata,
+          numeric_data = as.matrix(loaded$numeric_data)
+        )
+
         if ("Sample Name" %in% names(values$raw_data$metadata)) {
-          values$raw_data$metadata$`Sample Name`
-        } else {
-          character(0)
+          rownames(values$raw_data$numeric_data) <-
+            values$raw_data$metadata$`Sample Name`
+          rownames(values$raw_data$metadata) <-
+            values$raw_data$metadata$`Sample Name`
         }
-      }
-    )
-    .register_select_all_observers(
-      session, input, "selected_expression_groups",
-      function() {
-        shiny::req(values$raw_data)
-        gc <- if ("Sample Group" %in% names(values$raw_data$metadata)) {
-          "Sample Group"
-        } else {
-          names(values$raw_data$metadata)[1]
-        }
-        if (!is.null(values$raw_data$metadata[[gc]])) {
-          unique(values$raw_data$metadata[[gc]])
-        } else {
-          character(0)
-        }
-      }
-    )
-    .register_select_all_observers(
-      session, input, "report_sections",
-      function() c("data_summary", "normalization", "diff_analysis", "enrichment")
-    )
-    .register_select_all_observers(
-      session, input, "raw_filter_groups",
-      function() {
-        shiny::req(values$raw_data)
-        if ("Sample Group" %in% names(values$raw_data$metadata)) {
-          unique(values$raw_data$metadata$`Sample Group`)
-        } else {
-          character(0)
-        }
-      }
-    )
-    .register_select_all_observers(
-      session, input, "norm_filter_groups",
-      function() {
-        shiny::req(values$raw_data)
-        if ("Sample Group" %in% names(values$raw_data$metadata)) {
-          unique(values$raw_data$metadata$`Sample Group`)
-        } else {
-          character(0)
-        }
-      }
-    )
 
-    # ---- Load example data -----------------------------------------------
-    shiny::observeEvent(input$load_example, {
-      tryCatch(
-        {
-          example_data <- generate_example_data()
-          values$raw_data <- load_lipidomics_data_from_df(
-            example_data,
-            input$metadata_cols
-          )
+        lipid_names <- colnames(values$raw_data$numeric_data)
+        values$classification <- classify_lipids(lipid_names)
+        values$classification_data <- values$classification
+        values$use_custom_classification <- FALSE
 
-          if (!is.null(values$raw_data$metadata$`Sample Name`)) {
-            rownames(values$raw_data$numeric_data) <-
-              values$raw_data$metadata$`Sample Name`
-            rownames(values$raw_data$metadata) <-
-              values$raw_data$metadata$`Sample Name`
-          }
-
-          lipid_names <- colnames(values$raw_data$numeric_data)
-          values$classification <- classify_lipids(lipid_names)
-          values$classification_data <- values$classification
-
-          .update_ui_after_load(session, values)
-          shiny::showNotification("Example data loaded successfully!")
-        },
-        error = function(e) show_error(e, "Loading example data")
-      )
-    })
-
-    # ---- Load data from file ---------------------------------------------
-    shiny::observeEvent(input$load_data, {
-      shiny::req(input$file)
-      tryCatch(
-        {
-          loaded <- load_lipidomics_data(
-            input$file$datapath,
-            input$metadata_cols
-          )
-          values$raw_data <- list(
-            data         = loaded$data,
-            metadata     = loaded$metadata,
-            numeric_data = as.matrix(loaded$numeric_data)
-          )
-
-          if ("Sample Name" %in% names(values$raw_data$metadata)) {
-            rownames(values$raw_data$numeric_data) <-
-              values$raw_data$metadata$`Sample Name`
-            rownames(values$raw_data$metadata) <-
-              values$raw_data$metadata$`Sample Name`
-          }
-
-          lipid_names <- colnames(values$raw_data$numeric_data)
-          values$classification <- classify_lipids(lipid_names)
-          values$classification_data <- values$classification
-          values$use_custom_classification <- FALSE
-
-          .update_ui_after_load(session, values)
-          shiny::showNotification("Data loaded successfully!", type = "message")
-        },
-        error = function(e) {
-          shiny::showNotification(paste("Error loading data:", e$message),
-            type = "error"
-          )
-        }
-      )
-    })
-
-    # ---- Data summary / preview ------------------------------------------
-    output$data_summary <- shiny::renderText({
-      shiny::req(values$raw_data)
-      paste0(
-        "Samples: ", nrow(values$raw_data$data), "\n",
-        "Features: ", ncol(values$raw_data$numeric_data), "\n",
-        "Groups: ", paste(unique(values$raw_data$metadata$`Sample Group`),
-          collapse = ", "
+        .update_ui_after_load(session, values)
+        shiny::showNotification("Data loaded successfully!", type = "message")
+      },
+      error = function(e) {
+        shiny::showNotification(paste("Error loading data:", e$message),
+          type = "error"
         )
+      }
+    )
+  })
+  output$data_summary <- shiny::renderText({
+    shiny::req(values$raw_data)
+    paste0(
+      "Samples: ", nrow(values$raw_data$data), "\n",
+      "Features: ", ncol(values$raw_data$numeric_data), "\n",
+      "Groups: ", paste(unique(values$raw_data$metadata$`Sample Group`),
+        collapse = ", "
       )
-    })
-
-    output$data_preview <- DT::renderDataTable({
-      shiny::req(values$raw_data)
-      DT::datatable(utils::head(values$raw_data$data),
-        options = list(scrollX = TRUE, pageLength = 5)
-      )
-    })
-
-    # ---- Classification --------------------------------------------------
-    output$classification_table <- DT::renderDataTable({
-      cls <- if (values$use_custom_classification && !is.null(values$custom_classification)) {
+    )
+  })
+  output$data_preview <- DT::renderDataTable({
+    shiny::req(values$raw_data)
+    DT::datatable(utils::head(values$raw_data$data),
+      options = list(scrollX = TRUE, pageLength = 5)
+    )
+  })
+  output$classification_table <- DT::renderDataTable({
+    cls <- if (values$use_custom_classification && !is.null(values$custom_classification)) {
+      values$custom_classification
+    } else {
+      values$classification
+    }
+    if (!is.null(cls)) {
+      DT::datatable(cls, options = list(scrollX = TRUE, pageLength = 10))
+    } else {
+      NULL
+    }
+  })
+  output$download_classification <- shiny::downloadHandler(
+    filename = function() .dl_name("lipid_classification", ext = "csv"),
+    content = function(file) {
+      cls <- if (values$use_custom_classification) {
         values$custom_classification
       } else {
         values$classification
       }
-      if (!is.null(cls)) {
-        DT::datatable(cls, options = list(scrollX = TRUE, pageLength = 10))
-      } else {
-        NULL
-      }
-    })
-
-    output$download_classification <- shiny::downloadHandler(
-      filename = function() .dl_name("lipid_classification", ext = "csv"),
-      content = function(file) {
-        cls <- if (values$use_custom_classification) {
-          values$custom_classification
-        } else {
-          values$classification
-        }
-        utils::write.csv(cls, file, row.names = FALSE)
-      }
+      utils::write.csv(cls, file, row.names = FALSE)
+    }
+  )
+  shiny::observeEvent(input$load_custom_classification, {
+    shiny::req(input$custom_classification_file)
+    tryCatch(
+      {
+        values$custom_classification <-
+          load_custom_classification(input$custom_classification_file$datapath)
+        values$classification_data <- values$custom_classification
+        values$use_custom_classification <- TRUE
+        shiny::showNotification("Custom classification loaded!", type = "message")
+      },
+      error = function(e) show_error(e, "Loading custom classification")
     )
-
-    shiny::observeEvent(input$load_custom_classification, {
-      shiny::req(input$custom_classification_file)
-      tryCatch(
-        {
-          values$custom_classification <-
-            load_custom_classification(input$custom_classification_file$datapath)
-          values$classification_data <- values$custom_classification
-          values$use_custom_classification <- TRUE
-          shiny::showNotification("Custom classification loaded!", type = "message")
-        },
-        error = function(e) show_error(e, "Loading custom classification")
-      )
-    })
-
-    # Reset to automatic classification
-    shiny::observeEvent(input$reset_classification, {
-      shiny::req(values$classification)
-      values$custom_classification <- NULL
-      values$use_custom_classification <- FALSE
-      values$classification_data <- values$classification
-      # Restore default color_column choices
-      shiny::updateSelectInput(session, "color_column",
-        choices  = c("LipidGroup", "LipidType", "Saturation"),
-        selected = "LipidGroup"
-      )
-      shiny::showNotification("Automatic classification restored.", type = "message")
-    })
-
-    # Dynamically update color_column choices when classification data changes
-    shiny::observe({
-      cls <- values$classification_data
-      if (!is.null(cls)) {
-        cls_cols <- setdiff(colnames(cls), "Lipid")
-        if (length(cls_cols) > 0) {
-          shiny::updateSelectInput(session, "color_column",
-            choices  = cls_cols,
-            selected = cls_cols[1]
-          )
-          # Also update enrichment type choices if custom columns present
-          enrich_choices <- c()
-          if ("Saturation" %in% cls_cols) enrich_choices <- c(enrich_choices, "Saturation" = "Saturation")
-          if ("LipidGroup" %in% cls_cols) enrich_choices <- c(enrich_choices, "Lipid Group" = "LipidGroup")
-          if ("LipidType" %in% cls_cols) enrich_choices <- c(enrich_choices, "Lipid Type" = "LipidType")
-          # Add any custom columns not in the default set
-          custom_cols <- setdiff(cls_cols, c("Saturation", "LipidGroup", "LipidType"))
-          if (length(custom_cols) > 0) {
-            extra <- custom_cols
-            names(extra) <- custom_cols
-            enrich_choices <- c(enrich_choices, extra)
-          }
-          if (length(enrich_choices) > 0) {
-            for (id in c("enrichment_type", "enrichment_viz_type")) {
-              shiny::updateSelectInput(session, id, choices = enrich_choices)
-            }
+  })
+  shiny::observeEvent(input$reset_classification, {
+    shiny::req(values$classification)
+    values$custom_classification <- NULL
+    values$use_custom_classification <- FALSE
+    values$classification_data <- values$classification
+    # Restore default color_column choices
+    shiny::updateSelectInput(session, "color_column",
+      choices  = c("LipidGroup", "LipidType", "Saturation"),
+      selected = "LipidGroup"
+    )
+    shiny::showNotification("Automatic classification restored.", type = "message")
+  })
+  shiny::observe({
+    cls <- values$classification_data
+    if (!is.null(cls)) {
+      cls_cols <- setdiff(colnames(cls), "Lipid")
+      if (length(cls_cols) > 0) {
+        shiny::updateSelectInput(session, "color_column",
+          choices  = cls_cols,
+          selected = cls_cols[1]
+        )
+        # Also update enrichment type choices if custom columns present
+        enrich_choices <- c()
+        if ("Saturation" %in% cls_cols) enrich_choices <- c(enrich_choices, "Saturation" = "Saturation")
+        if ("LipidGroup" %in% cls_cols) enrich_choices <- c(enrich_choices, "Lipid Group" = "LipidGroup")
+        if ("LipidType" %in% cls_cols) enrich_choices <- c(enrich_choices, "Lipid Type" = "LipidType")
+        # Add any custom columns not in the default set
+        custom_cols <- setdiff(cls_cols, c("Saturation", "LipidGroup", "LipidType"))
+        if (length(custom_cols) > 0) {
+          extra <- custom_cols
+          names(extra) <- custom_cols
+          enrich_choices <- c(enrich_choices, extra)
+        }
+        if (length(enrich_choices) > 0) {
+          for (id in c("enrichment_type", "enrichment_viz_type")) {
+            shiny::updateSelectInput(session, id, choices = enrich_choices)
           }
         }
       }
-    })
-
-    shiny::observeEvent(input$info_classification, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Lipid Classification",
-        easyClose = TRUE,
-        footer = shiny::modalButton("Close"),
-        shiny::HTML("
+    }
+  })
+  shiny::observeEvent(input$info_classification, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Lipid Classification",
+      easyClose = TRUE,
+      footer = shiny::modalButton("Close"),
+      shiny::HTML("
           <p>Lipids are automatically classified based on their name prefixes:</p>
           <ul>
             <li><strong>LipidGroup</strong>: broad class (e.g., Glycerophospholipids, Sphingolipids)</li>
@@ -1699,229 +1748,237 @@ Methods are applied left-to-right in the order you select them.
           </ul>
           <p>Upload a custom CSV (<em>Lipid</em> column + classification columns) to override this.</p>
         ")
-      ))
-    })
+    ))
+  })
+}
 
-    # ---- Lipid / sample choice updates -----------------------------------
-    shiny::observe({
-      shiny::req(values$raw_data)
-      if (!is.null(values$raw_data$numeric_data)) {
-        shiny::updateSelectizeInput(session, "selected_lipids",
-          choices = colnames(values$raw_data$numeric_data)
-        )
-      }
-    })
+#' @noRd
+.setup_raw_viz_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observe({
+    shiny::req(values$raw_data)
+    if (!is.null(values$raw_data$numeric_data)) {
+      shiny::updateSelectizeInput(session, "selected_lipids",
+        choices = colnames(values$raw_data$numeric_data)
+      )
+    }
+  })
+  shiny::observe({
+    shiny::req(values$raw_data)
+    md <- values$raw_data$metadata
+    if ("Sample Name" %in% names(md)) {
+      shiny::updateCheckboxGroupInput(session, "selected_samples",
+        choices  = md$`Sample Name`,
+        selected = md$`Sample Name`
+      )
+    }
+    gc <- if ("Sample Group" %in% names(md)) "Sample Group" else names(md)[1]
+    if (!is.null(md[[gc]])) {
+      grps <- unique(md[[gc]])
+      shiny::updateCheckboxGroupInput(session, "selected_expression_groups",
+        choices = grps, selected = grps
+      )
+    }
+  })
+  shiny::observe({
+    shiny::req(values$raw_data, input$group_column)
+    md <- values$raw_data$metadata
+    if (input$group_column %in% names(md)) {
+      grps <- unique(md[[input$group_column]])
+      grps <- grps[!is.na(grps)]
+      shiny::updateCheckboxGroupInput(session, "groups_included",
+        choices = grps, selected = grps
+      )
+    }
+  })
+  shiny::observeEvent(input$create_raw_plot, {
+    shiny::req(values$raw_data)
+    tryCatch(
+      {
+        # Apply group filter
+        raw_data_filtered <- values$raw_data
+        if (!is.null(input$raw_filter_groups) && length(input$raw_filter_groups) > 0 &&
+          "Sample Group" %in% names(values$raw_data$metadata)) {
+          mask <- values$raw_data$metadata$`Sample Group` %in% input$raw_filter_groups
+          raw_data_filtered <- list(
+            numeric_data = values$raw_data$numeric_data[mask, , drop = FALSE],
+            metadata     = values$raw_data$metadata[mask, , drop = FALSE]
+          )
+        }
+        metadata <- if (isTRUE(input$raw_color_by_group)) raw_data_filtered$metadata else NULL
 
-    shiny::observe({
-      shiny::req(values$raw_data)
-      md <- values$raw_data$metadata
-      if ("Sample Name" %in% names(md)) {
-        shiny::updateCheckboxGroupInput(session, "selected_samples",
-          choices  = md$`Sample Name`,
-          selected = md$`Sample Name`
-        )
-      }
-      gc <- if ("Sample Group" %in% names(md)) "Sample Group" else names(md)[1]
-      if (!is.null(md[[gc]])) {
-        grps <- unique(md[[gc]])
-        shiny::updateCheckboxGroupInput(session, "selected_expression_groups",
-          choices = grps, selected = grps
-        )
-      }
-    })
-
-    # ---- group_column -> groups_included update -------------------------
-    shiny::observe({
-      shiny::req(values$raw_data, input$group_column)
-      md <- values$raw_data$metadata
-      if (input$group_column %in% names(md)) {
-        grps <- unique(md[[input$group_column]])
-        grps <- grps[!is.na(grps)]
-        shiny::updateCheckboxGroupInput(session, "groups_included",
-          choices = grps, selected = grps
-        )
-      }
-    })
-
-    # ---- Raw data visualization -----------------------------------------
-    shiny::observeEvent(input$create_raw_plot, {
-      shiny::req(values$raw_data)
-      tryCatch(
-        {
-          # Apply group filter
-          raw_data_filtered <- values$raw_data
-          if (!is.null(input$raw_filter_groups) && length(input$raw_filter_groups) > 0 &&
-            "Sample Group" %in% names(values$raw_data$metadata)) {
-            mask <- values$raw_data$metadata$`Sample Group` %in% input$raw_filter_groups
-            raw_data_filtered <- list(
-              numeric_data = values$raw_data$numeric_data[mask, , drop = FALSE],
-              metadata     = values$raw_data$metadata[mask, , drop = FALSE]
-            )
-          }
-          metadata <- if (isTRUE(input$raw_color_by_group)) raw_data_filtered$metadata else NULL
-
-          if (input$plot_type == "heatmap") {
-            hm <- create_heatmap_robust(
-              data_matrix  = t(raw_data_filtered$numeric_data),
-              metadata     = raw_data_filtered$metadata,
-              group_column = "Sample Group",
-              top_n        = input$raw_heatmap_top_n,
-              title        = "Raw Data Heatmap - Top Variable Lipids"
-            )
-            values$current_raw_plot <- hm
-            values$current_plot     <- hm
-            add_to_history("Raw Data", "Raw heatmap", hm)
-            output$raw_plot_ui <- shiny::renderUI(
-              shiny::plotOutput("raw_heatmap_plot", height = "600px")
-            )
-            output$raw_heatmap_plot <- shiny::renderPlot({
-              if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else print(hm)
-            })
+        if (input$plot_type == "heatmap") {
+          hm <- create_heatmap_robust(
+            data_matrix  = t(raw_data_filtered$numeric_data),
+            metadata     = raw_data_filtered$metadata,
+            group_column = "Sample Group",
+            top_n        = input$raw_heatmap_top_n,
+            title        = "Raw Data Heatmap - Top Variable Lipids"
+          )
+          values$current_raw_plot <- hm
+          values$current_plot <- hm
+          add_to_history("Raw Data", "Raw heatmap", hm)
+          output$raw_plot_ui <- shiny::renderUI(
+            shiny::plotOutput("raw_heatmap_plot", height = "600px")
+          )
+          output$raw_heatmap_plot <- shiny::renderPlot({
+            if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else grid::grid.draw(ggplot2::ggplotGrob(hm))
+          })
+        } else {
+          top_n <- if (input$view_mode == "lipid") {
+            input$top_n_lipids
+          } else if (isTRUE(input$limit_top_samples)) {
+            input$top_n_samples
           } else {
-            top_n <- if (input$view_mode == "lipid") {
-              input$top_n_lipids
-            } else if (isTRUE(input$limit_top_samples)) {
-              input$top_n_samples
-            } else {
-              NULL
-            }
-            plot  <- visualize_raw_data_improved(
-              raw_data_filtered, input$plot_type, input$view_mode,
-              top_n, metadata = metadata
-            )
-            values$current_raw_plot <- plot
-            values$current_plot     <- plot
-            add_to_history("Raw Data", paste("Raw", input$plot_type, input$view_mode), plot)
-            output$raw_plot_ui <- shiny::renderUI(
-              plotly::plotlyOutput("raw_plot", height = "500px")
-            )
-            output$raw_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
+            NULL
           }
-        },
-        error = function(e) show_error(e, "Raw data visualization")
-      )
-    })
-
-    # ---- Normalization pipeline comparison -------------------------------
-    # Store pipeline data when button is clicked
-    shiny::observeEvent(input$compare_pipelines, {
-      shiny::req(values$raw_data)
-      tryCatch(
-        {
-          values$pipeline1_data <- apply_normalizations(
-            values$raw_data$numeric_data,
-            input$norm_methods_1
+          plot <- visualize_raw_data_improved(
+            raw_data_filtered, input$plot_type, input$view_mode,
+            top_n,
+            metadata = metadata
           )
-          values$pipeline2_data <- apply_normalizations(
-            values$raw_data$numeric_data,
-            input$norm_methods_2
+          values$current_raw_plot <- plot
+          values$current_plot <- plot
+          add_to_history("Raw Data", paste("Raw", input$plot_type, input$view_mode), plot)
+          output$raw_plot_ui <- shiny::renderUI(
+            plotly::plotlyOutput("raw_plot", height = "500px")
           )
-          values$pipeline1_methods <- input$norm_methods_1
-          values$pipeline2_methods <- input$norm_methods_2
-          shiny::showNotification("Pipeline comparison complete!", type = "message")
-        },
-        error = function(e) show_error(e, "Pipeline comparison")
-      )
-    })
+          output$raw_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
+        }
+      },
+      error = function(e) show_error(e, "Raw data visualization")
+    )
+  })
+  shiny::observeEvent(input$compare_pipelines, {
+    shiny::req(values$raw_data)
+    tryCatch(
+      {
+        # Compute both pipelines into locals first: if either one fails (e.g.
+        # "VSN" selected without the vsn package installed) nothing is
+        # committed, so the comparison never shows a half-updated result
+        # labelled with the newly selected methods.
+        p1 <- apply_normalizations(
+          values$raw_data$numeric_data,
+          input$norm_methods_1
+        )
+        p2 <- apply_normalizations(
+          values$raw_data$numeric_data,
+          input$norm_methods_2
+        )
+        values$pipeline1_data <- p1
+        values$pipeline2_data <- p2
+        values$pipeline1_methods <- input$norm_methods_1
+        values$pipeline2_methods <- input$norm_methods_2
+        shiny::showNotification("Pipeline comparison complete!", type = "message")
+      },
+      error = function(e) show_error(e, "Pipeline comparison")
+    )
+  })
+  output$pipeline_comparison <- shiny::renderPlot({
+    shiny::req(values$pipeline1_data, values$pipeline2_data)
+    md <- if (isTRUE(input$norm_color_by_group)) values$raw_data$metadata else NULL
+    pt <- input$norm_compare_plot_type
+    lbl1 <- if (!is.null(values$pipeline1_methods)) {
+      paste(values$pipeline1_methods, collapse = " -> ")
+    } else {
+      "Pipeline 1"
+    }
+    lbl2 <- if (!is.null(values$pipeline2_methods)) {
+      paste(values$pipeline2_methods, collapse = " -> ")
+    } else {
+      "Pipeline 2"
+    }
+    cmp_view <- if (is.null(input$norm_compare_view_mode)) {
+      "sample"
+    } else {
+      input$norm_compare_view_mode
+    }
+    cmp_top_n <- if (isTRUE(input$norm_compare_limit_top)) {
+      input$norm_compare_top_n
+    } else {
+      NULL
+    }
+    p1 <- create_pipeline_plot(values$pipeline1_data,
+      title = paste("Pipeline 1:", lbl1),
+      metadata = md, plot_type = pt,
+      view_mode = cmp_view, top_n = cmp_top_n
+    )
+    p2 <- create_pipeline_plot(values$pipeline2_data,
+      title = paste("Pipeline 2:", lbl2),
+      metadata = md, plot_type = pt,
+      view_mode = cmp_view, top_n = cmp_top_n
+    )
+    shiny::isolate(values$current_pipeline_plots <- list(p1 = p1, p2 = p2))
+    gridExtra::grid.arrange(p1, p2, ncol = 1)
+  })
+}
 
-    # Reactive renderPlot: re-builds automatically whenever data OR plot type changes
-    output$pipeline_comparison <- shiny::renderPlot({
-      shiny::req(values$pipeline1_data, values$pipeline2_data)
-      md <- if (isTRUE(input$norm_color_by_group)) values$raw_data$metadata else NULL
-      pt <- input$norm_compare_plot_type
-      lbl1 <- if (!is.null(values$pipeline1_methods)) {
-        paste(values$pipeline1_methods, collapse = " -> ")
-      } else {
-        "Pipeline 1"
-      }
-      lbl2 <- if (!is.null(values$pipeline2_methods)) {
-        paste(values$pipeline2_methods, collapse = " -> ")
-      } else {
-        "Pipeline 2"
-      }
-      cmp_view <- if (is.null(input$norm_compare_view_mode)) {
-        "sample"
-      } else {
-        input$norm_compare_view_mode
-      }
-      cmp_top_n <- if (isTRUE(input$norm_compare_limit_top)) {
-        input$norm_compare_top_n
-      } else {
-        NULL
-      }
-      p1 <- create_pipeline_plot(values$pipeline1_data,
-        title = paste("Pipeline 1:", lbl1),
-        metadata = md, plot_type = pt,
-        view_mode = cmp_view, top_n = cmp_top_n
-      )
-      p2 <- create_pipeline_plot(values$pipeline2_data,
-        title = paste("Pipeline 2:", lbl2),
-        metadata = md, plot_type = pt,
-        view_mode = cmp_view, top_n = cmp_top_n
-      )
-      shiny::isolate(values$current_pipeline_plots <- list(p1 = p1, p2 = p2))
-      gridExtra::grid.arrange(p1, p2, ncol = 1)
-    })
+#' @noRd
+.setup_normalization_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$apply_normalization, {
+    shiny::req(values$raw_data, input$chosen_pipeline)
+    tryCatch(
+      {
+        methods <- if (input$chosen_pipeline == "1") {
+          input$norm_methods_1
+        } else {
+          input$norm_methods_2
+        }
 
-    # ---- Apply normalization --------------------------------------------
-    shiny::observeEvent(input$apply_normalization, {
-      shiny::req(values$raw_data, input$chosen_pipeline)
-      tryCatch(
-        {
-          methods <- if (input$chosen_pipeline == "1") {
-            input$norm_methods_1
-          } else {
-            input$norm_methods_2
-          }
+        # Any failing step (e.g. "VSN" without the Bioconductor vsn package)
+        # throws here, so values$normalized_data is left untouched and the
+        # success notification below is never reached -- the app must not
+        # report a method as applied when it was not, and never substitutes a
+        # different method.
+        norm_mat <- apply_normalizations(values$raw_data$numeric_data, methods)
 
-          norm_mat <- apply_normalizations(values$raw_data$numeric_data, methods)
+        if (!is.null(rownames(values$raw_data$numeric_data))) {
+          rownames(norm_mat) <- rownames(values$raw_data$numeric_data)
+        }
 
-          if (!is.null(rownames(values$raw_data$numeric_data))) {
-            rownames(norm_mat) <- rownames(values$raw_data$numeric_data)
-          }
-
-          values$normalized_data <- list(
-            data         = cbind(values$raw_data$metadata, norm_mat),
-            metadata     = values$raw_data$metadata,
-            numeric_data = norm_mat
+        values$normalized_data <- list(
+          data         = cbind(values$raw_data$metadata, norm_mat),
+          metadata     = values$raw_data$metadata,
+          numeric_data = norm_mat,
+          methods      = methods
+        )
+        shiny::showNotification(
+          paste0(
+            "Normalization applied successfully: ",
+            paste(methods, collapse = " -> ")
           )
-          shiny::showNotification("Normalization applied successfully!")
-        },
-        error = function(e) show_error(e, "Applying normalization")
-      )
-    })
-
-    # Normalization method descriptions modal
-    shiny::observeEvent(input$info_norm_methods, {
-      descs <- get_normalization_descriptions()
-      html_rows <- paste(
-        vapply(names(descs), function(m) {
-          paste0("<dt><strong>", m, "</strong></dt><dd>", descs[[m]], "</dd>")
-        }, character(1)),
-        collapse = "\n"
-      )
-      shiny::showModal(shiny::modalDialog(
-        title = "Normalization Method Descriptions",
-        size = "l",
-        easyClose = TRUE,
-        footer = shiny::modalButton("Close"),
-        shiny::HTML(paste0(
-          "<dl class='dl-horizontal'>", html_rows, "</dl>",
-          "<hr><p><strong>Note on Quantile Normalization:</strong> ",
-          "After quantile normalization, per-sample boxplots will look nearly ",
-          "identical - this is the <em>expected, correct</em> behaviour, not a bug. ",
-          "The method forces every sample to share the same intensity distribution.</p>"
-        ))
+        )
+      },
+      error = function(e) show_error(e, "Applying normalization")
+    )
+  })
+  shiny::observeEvent(input$info_norm_methods, {
+    descs <- get_normalization_descriptions()
+    html_rows <- paste(
+      vapply(names(descs), function(m) {
+        paste0("<dt><strong>", m, "</strong></dt><dd>", descs[[m]], "</dd>")
+      }, character(1)),
+      collapse = "\n"
+    )
+    shiny::showModal(shiny::modalDialog(
+      title = "Normalization Method Descriptions",
+      size = "l",
+      easyClose = TRUE,
+      footer = shiny::modalButton("Close"),
+      shiny::HTML(paste0(
+        "<dl class='dl-horizontal'>", html_rows, "</dl>",
+        "<hr><p><strong>Note on Quantile Normalization:</strong> ",
+        "After quantile normalization, per-sample boxplots will look nearly ",
+        "identical - this is the <em>expected, correct</em> behaviour, not a bug. ",
+        "The method forces every sample to share the same intensity distribution.</p>"
       ))
-    })
-
-    # Ellipse help modal
-    shiny::observeEvent(input$info_ellipses, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Ellipse Types",
-        easyClose = TRUE,
-        footer = shiny::modalButton("Close"),
-        shiny::HTML("
+    ))
+  })
+  shiny::observeEvent(input$info_ellipses, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Ellipse Types",
+      easyClose = TRUE,
+      footer = shiny::modalButton("Close"),
+      shiny::HTML("
           <dl>
             <dt><strong>None</strong></dt>
             <dd>No ellipse drawn. Only the scatter points are shown.</dd>
@@ -1936,251 +1993,243 @@ Methods are applied left-to-right in the order you select them.
           Enable 'Show Sample Labels' to see individual sample names in addition to
           the group ellipses.</p>
         ")
-      ))
-    })
+    ))
+  })
+  shiny::observeEvent(input$create_norm_plot, {
+    shiny::req(values$normalized_data)
+    tryCatch(
+      {
+        group_col <- input$group_column
+        if (is.null(rownames(values$normalized_data$metadata))) {
+          rownames(values$normalized_data$metadata) <-
+            rownames(values$normalized_data$numeric_data)
+        }
 
-    # ---- Normalized data visualization ----------------------------------
-    shiny::observeEvent(input$create_norm_plot, {
-      shiny::req(values$normalized_data)
-      tryCatch(
-        {
-          group_col <- input$group_column
-          if (is.null(rownames(values$normalized_data$metadata))) {
-            rownames(values$normalized_data$metadata) <-
-              rownames(values$normalized_data$numeric_data)
-          }
+        # Filter by selected groups
+        # Filter by norm_filter_groups (independent of PCA groups_included)
+        filter_grps <- if (length(input$norm_filter_groups) > 0) {
+          input$norm_filter_groups
+        } else {
+          NULL
+        }
+        if (!is.null(filter_grps) && group_col %in% colnames(values$normalized_data$metadata)) {
+          mask <- values$normalized_data$metadata[[group_col]] %in% filter_grps
+          filt_dat <- values$normalized_data$numeric_data[mask, , drop = FALSE]
+          filt_md <- values$normalized_data$metadata[mask, , drop = FALSE]
+        } else if (!is.null(input$groups_included) && length(input$groups_included) > 0 &&
+          group_col %in% colnames(values$normalized_data$metadata)) {
+          mask <- values$normalized_data$metadata[[group_col]] %in% input$groups_included
+          filt_dat <- values$normalized_data$numeric_data[mask, , drop = FALSE]
+          filt_md <- values$normalized_data$metadata[mask, , drop = FALSE]
+        } else {
+          filt_dat <- values$normalized_data$numeric_data
+          filt_md <- values$normalized_data$metadata
+        }
 
-          # Filter by selected groups
-          # Filter by norm_filter_groups (independent of PCA groups_included)
-          filter_grps <- if (length(input$norm_filter_groups) > 0) {
-            input$norm_filter_groups
+        if (input$norm_plot_type %in% c("boxplot", "violin", "density")) {
+          dl <- list(numeric_data = filt_dat, metadata = filt_md)
+          md_col <- if (isTRUE(input$norm_color_by_group_viz)) filt_md else NULL
+          norm_top_n <- if (isTRUE(input$norm_limit_top_samples)) {
+            input$norm_top_n_samples
           } else {
             NULL
           }
-          if (!is.null(filter_grps) && group_col %in% colnames(values$normalized_data$metadata)) {
-            mask <- values$normalized_data$metadata[[group_col]] %in% filter_grps
-            filt_dat <- values$normalized_data$numeric_data[mask, , drop = FALSE]
-            filt_md <- values$normalized_data$metadata[mask, , drop = FALSE]
-          } else if (!is.null(input$groups_included) && length(input$groups_included) > 0 &&
-            group_col %in% colnames(values$normalized_data$metadata)) {
-            mask <- values$normalized_data$metadata[[group_col]] %in% input$groups_included
-            filt_dat <- values$normalized_data$numeric_data[mask, , drop = FALSE]
-            filt_md <- values$normalized_data$metadata[mask, , drop = FALSE]
-          } else {
-            filt_dat <- values$normalized_data$numeric_data
-            filt_md <- values$normalized_data$metadata
-          }
-
-          if (input$norm_plot_type %in% c("boxplot", "violin", "density")) {
-            dl <- list(numeric_data = filt_dat, metadata = filt_md)
-            md_col <- if (isTRUE(input$norm_color_by_group_viz)) filt_md else NULL
-            norm_top_n <- if (isTRUE(input$norm_limit_top_samples)) {
-              input$norm_top_n_samples
-            } else {
-              NULL
-            }
-            plot <- visualize_raw_data_improved(
-              dl, input$norm_plot_type, "sample",
-              top_n = norm_top_n,
-              metadata = md_col, group_column = group_col
-            )
-            values$current_norm_plot <- plot
-            add_to_history("Normalized Data", paste("Norm", input$norm_plot_type), plot)
-            output$norm_plot_ui <- shiny::renderUI(
-              plotly::plotlyOutput("norm_plot", height = "500px")
-            )
-            output$norm_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
-
-          } else if (input$norm_plot_type == "heatmap") {
-            hm <- create_heatmap_robust(
-              data_matrix  = t(filt_dat),
-              metadata     = filt_md,
-              group_column = group_col,
-              top_n        = input$norm_heatmap_top_n,
-              title        = "Normalised Data Heatmap - Top Variable Lipids"
-            )
-            values$current_norm_plot <- hm
-            add_to_history("Normalized Data", "Norm heatmap", hm)
-            output$norm_plot_ui <- shiny::renderUI(
-              shiny::plotOutput("norm_heatmap_plot", height = "600px")
-            )
-            output$norm_heatmap_plot <- shiny::renderPlot({
-              if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else print(hm)
-            })
-
-          } else if (input$norm_plot_type == "pca") {
-            shiny::req(group_col)
-            pca_res <- perform_pca(filt_dat, filt_md, group_col)
-            plot <- create_pca_plot_with_ellipses(
-              pca_data = pca_res$pca_data,
-              variance_explained = pca_res$variance_explained,
-              ellipse_type = input$ellipse_type,
-              show_sample_labels = isTRUE(input$show_sample_labels)
-            )
-            values$current_norm_plot <- plot
-            add_to_history("Normalized Data", "Norm PCA", plot)
-            output$norm_plot_ui <- shiny::renderUI(
-              plotly::plotlyOutput("norm_plot", height = "500px")
-            )
-            output$norm_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
-
-          } else if (input$norm_plot_type == "plsda") {
-            shiny::req(group_col)
-            plsda_res <- perform_plsda(as.matrix(filt_dat), filt_md, group_col)
-            plot <- create_plsda_plot_with_ellipses(
-              plsda_data = plsda_res$scores_data,
-              ellipse_type = input$ellipse_type,
-              show_sample_labels = isTRUE(input$show_sample_labels)
-            )
-            values$current_norm_plot <- plot
-            add_to_history("Normalized Data", "Norm PLS-DA", plot)
-            output$norm_plot_ui <- shiny::renderUI(
-              plotly::plotlyOutput("norm_plot", height = "500px")
-            )
-            output$norm_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
-          }
-        },
-        error = function(e) show_error(e, "Creating normalized data plot")
-      )
-    })
-
-    # ---- Lipid expression -----------------------------------------------
-    shiny::observeEvent(input$create_expression_plot, {
-      shiny::req(values$raw_data, input$selected_lipids)
-      tryCatch(
-        {
-          if (input$expression_data_type == "normalized" &&
-            !is.null(values$normalized_data)) {
-            data_use <- values$normalized_data$numeric_data
-            md_use <- values$normalized_data$metadata
-          } else {
-            data_use <- values$raw_data$numeric_data
-            md_use <- values$raw_data$metadata
-          }
-
-          sel_samples <- if (input$expression_selection_mode == "samples") {
-            input$selected_samples
-          } else {
-            NULL
-          }
-          sel_groups <- if (input$expression_selection_mode == "groups") {
-            input$selected_expression_groups
-          } else {
-            NULL
-          }
-
-          gc <- if ("Sample Group" %in% names(md_use)) {
-            "Sample Group"
-          } else {
-            names(md_use)[1]
-          }
-
-          plots <- create_lipid_expression_barplot(
-            data_matrix      = data_use,
-            metadata         = md_use,
-            selected_lipids  = input$selected_lipids,
-            selected_samples = sel_samples,
-            selected_groups  = sel_groups,
-            group_column     = gc,
-            data_type        = input$expression_data_type
+          plot <- visualize_raw_data_improved(
+            dl, input$norm_plot_type, "sample",
+            top_n = norm_top_n,
+            metadata = md_col, group_column = group_col
           )
-
-          values$current_expression_plots <- plots
-
-          # Add each lipid plot to history
-          if (is.list(plots) && !inherits(plots, "ggplot")) {
-            for (nm in names(plots)) {
-              add_to_history("Lipid Expression", paste("Expression", nm), plots[[nm]])
-            }
-          } else {
-            add_to_history("Lipid Expression", "Expression Plot", plots)
-          }
-
-          shiny::showNotification("Plots created!", type = "message")
-        },
-        error = function(e) show_error(e, "Creating expression plot")
-      )
-    })
-
-    output$expression_plots_ui <- shiny::renderUI({
-      shiny::req(values$current_expression_plots)
-      if (is.list(values$current_expression_plots) &&
-        !inherits(values$current_expression_plots, "ggplot")) {
-        do.call(shiny::tagList, lapply(
-          names(values$current_expression_plots),
-          function(lipid) {
-            shinydashboard::box(
-              title = lipid, width = 12,
-              shiny::plotOutput(
-                paste0("expr_plot_", make.names(lipid)),
-                height = "400px"
-              )
-            )
-          }
-        ))
-      } else {
-        shiny::plotOutput("expr_plot_single", height = "400px")
-      }
-    })
-
-    shiny::observe({
-      plots <- values$current_expression_plots
-      if (is.list(plots) && !inherits(plots, "ggplot")) {
-        lapply(names(plots), function(lipid) {
-          local({
-            my_lipid <- lipid
-            output_name <- paste0("expr_plot_", make.names(my_lipid))
-            output[[output_name]] <- shiny::renderPlot(plots[[my_lipid]])
+          values$current_norm_plot <- plot
+          add_to_history("Normalized Data", paste("Norm", input$norm_plot_type), plot)
+          output$norm_plot_ui <- shiny::renderUI(
+            plotly::plotlyOutput("norm_plot", height = "500px")
+          )
+          output$norm_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
+        } else if (input$norm_plot_type == "heatmap") {
+          hm <- create_heatmap_robust(
+            data_matrix  = t(filt_dat),
+            metadata     = filt_md,
+            group_column = group_col,
+            top_n        = input$norm_heatmap_top_n,
+            title        = "Normalised Data Heatmap - Top Variable Lipids"
+          )
+          values$current_norm_plot <- hm
+          add_to_history("Normalized Data", "Norm heatmap", hm)
+          output$norm_plot_ui <- shiny::renderUI(
+            shiny::plotOutput("norm_heatmap_plot", height = "600px")
+          )
+          output$norm_heatmap_plot <- shiny::renderPlot({
+            if (inherits(hm, "pheatmap")) grid::grid.draw(hm$gtable) else grid::grid.draw(ggplot2::ggplotGrob(hm))
           })
+        } else if (input$norm_plot_type == "pca") {
+          shiny::req(group_col)
+          pca_res <- perform_pca(filt_dat, filt_md, group_col)
+          plot <- create_pca_plot_with_ellipses(
+            pca_data = pca_res$pca_data,
+            variance_explained = pca_res$variance_explained,
+            ellipse_type = input$ellipse_type,
+            show_sample_labels = isTRUE(input$show_sample_labels)
+          )
+          values$current_norm_plot <- plot
+          add_to_history("Normalized Data", "Norm PCA", plot)
+          output$norm_plot_ui <- shiny::renderUI(
+            plotly::plotlyOutput("norm_plot", height = "500px")
+          )
+          output$norm_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
+        } else if (input$norm_plot_type == "plsda") {
+          shiny::req(group_col)
+          plsda_res <- perform_plsda(as.matrix(filt_dat), filt_md, group_col)
+          plot <- create_plsda_plot_with_ellipses(
+            plsda_data = plsda_res$scores_data,
+            ellipse_type = input$ellipse_type,
+            show_sample_labels = isTRUE(input$show_sample_labels)
+          )
+          values$current_norm_plot <- plot
+          add_to_history("Normalized Data", "Norm PLS-DA", plot)
+          output$norm_plot_ui <- shiny::renderUI(
+            plotly::plotlyOutput("norm_plot", height = "500px")
+          )
+          output$norm_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
+        }
+      },
+      error = function(e) show_error(e, "Creating normalized data plot")
+    )
+  })
+}
+
+#' @noRd
+.setup_expression_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$create_expression_plot, {
+    shiny::req(values$raw_data, input$selected_lipids)
+    tryCatch(
+      {
+        if (input$expression_data_type == "normalized" &&
+          !is.null(values$normalized_data)) {
+          data_use <- values$normalized_data$numeric_data
+          md_use <- values$normalized_data$metadata
+        } else {
+          data_use <- values$raw_data$numeric_data
+          md_use <- values$raw_data$metadata
+        }
+
+        sel_samples <- if (input$expression_selection_mode == "samples") {
+          input$selected_samples
+        } else {
+          NULL
+        }
+        sel_groups <- if (input$expression_selection_mode == "groups") {
+          input$selected_expression_groups
+        } else {
+          NULL
+        }
+
+        gc <- if ("Sample Group" %in% names(md_use)) {
+          "Sample Group"
+        } else {
+          names(md_use)[1]
+        }
+
+        plots <- create_lipid_expression_barplot(
+          data_matrix      = data_use,
+          metadata         = md_use,
+          selected_lipids  = input$selected_lipids,
+          selected_samples = sel_samples,
+          selected_groups  = sel_groups,
+          group_column     = gc,
+          data_type        = input$expression_data_type
+        )
+
+        values$current_expression_plots <- plots
+
+        # Add each lipid plot to history
+        if (is.list(plots) && !inherits(plots, "ggplot")) {
+          for (nm in names(plots)) {
+            add_to_history("Lipid Expression", paste("Expression", nm), plots[[nm]])
+          }
+        } else {
+          add_to_history("Lipid Expression", "Expression Plot", plots)
+        }
+
+        shiny::showNotification("Plots created!", type = "message")
+      },
+      error = function(e) show_error(e, "Creating expression plot")
+    )
+  })
+  output$expression_plots_ui <- shiny::renderUI({
+    shiny::req(values$current_expression_plots)
+    if (is.list(values$current_expression_plots) &&
+      !inherits(values$current_expression_plots, "ggplot")) {
+      do.call(shiny::tagList, lapply(
+        names(values$current_expression_plots),
+        function(lipid) {
+          shinydashboard::box(
+            title = lipid, width = 12,
+            shiny::plotOutput(
+              paste0("expr_plot_", make.names(lipid)),
+              height = "400px"
+            )
+          )
+        }
+      ))
+    } else {
+      shiny::plotOutput("expr_plot_single", height = "400px")
+    }
+  })
+}
+
+#' @noRd
+.setup_diff_analysis_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observe({
+    plots <- values$current_expression_plots
+    if (is.list(plots) && !inherits(plots, "ggplot")) {
+      lapply(names(plots), function(lipid) {
+        local({
+          my_lipid <- lipid
+          output_name <- paste0("expr_plot_", make.names(my_lipid))
+          output[[output_name]] <- shiny::renderPlot(plots[[my_lipid]])
         })
-      } else if (!is.null(plots)) {
-        output$expr_plot_single <- shiny::renderPlot(plots)
-      }
-    })
-
-    # ---- Differential analysis contrasts --------------------------------
-    shiny::observe({
-      md <- if (!is.null(values$normalized_data)) {
-        values$normalized_data$metadata
-      } else if (!is.null(values$raw_data)) {
-        values$raw_data$metadata
-      } else {
-        NULL
-      }
-      shiny::req(md, input$group_col_diff)
-      if (input$group_col_diff %in% names(md)) {
-        grps <- levels(factor(md[[input$group_col_diff]]))
-        values$available_contrasts <- create_default_contrasts(grps)
-      }
-    })
-
-    output$contrast_selection_ui <- shiny::renderUI({
-      shiny::req(values$available_contrasts)
-      .checkbox_group_with_buttons(
-        "selected_contrasts", "Choose Contrasts:",
-        choices = values$available_contrasts,
-        selected = values$available_contrasts
-      )
-    })
-
-    # Wire Select/Deselect for dynamically rendered contrast checkboxes
-    shiny::observeEvent(input$selected_contrasts_select_all, {
-      shiny::updateCheckboxGroupInput(session, "selected_contrasts",
-        selected = values$available_contrasts
-      )
-    })
-    shiny::observeEvent(input$selected_contrasts_deselect_all, {
-      shiny::updateCheckboxGroupInput(session, "selected_contrasts",
-        selected = character(0)
-      )
-    })
-
-    # ---- Info modals for diff analysis -----------------------------------
-    shiny::observeEvent(input$info_methods, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Differential Analysis Methods", easyClose = TRUE,
-        footer = shiny::modalButton("Close"),
-        shiny::HTML("
+      })
+    } else if (!is.null(plots)) {
+      output$expr_plot_single <- shiny::renderPlot(plots)
+    }
+  })
+  shiny::observe({
+    md <- if (!is.null(values$normalized_data)) {
+      values$normalized_data$metadata
+    } else if (!is.null(values$raw_data)) {
+      values$raw_data$metadata
+    } else {
+      NULL
+    }
+    shiny::req(md, input$group_col_diff)
+    if (input$group_col_diff %in% names(md)) {
+      grps <- levels(factor(md[[input$group_col_diff]]))
+      values$available_contrasts <- create_default_contrasts(grps)
+    }
+  })
+  output$contrast_selection_ui <- shiny::renderUI({
+    shiny::req(values$available_contrasts)
+    .checkbox_group_with_buttons(
+      "selected_contrasts", "Choose Contrasts:",
+      choices = values$available_contrasts,
+      selected = values$available_contrasts
+    )
+  })
+  shiny::observeEvent(input$selected_contrasts_select_all, {
+    shiny::updateCheckboxGroupInput(session, "selected_contrasts",
+      selected = values$available_contrasts
+    )
+  })
+  shiny::observeEvent(input$selected_contrasts_deselect_all, {
+    shiny::updateCheckboxGroupInput(session, "selected_contrasts",
+      selected = character(0)
+    )
+  })
+  shiny::observeEvent(input$info_methods, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Differential Analysis Methods", easyClose = TRUE,
+      footer = shiny::modalButton("Close"),
+      shiny::HTML("
           <h4>limma</h4>
           <p>Linear Models for Microarray and Omics Data. Fast, robust for
              continuous normalized data. Recommended for lipidomics.</p>
@@ -2188,14 +2237,13 @@ Methods are applied left-to-right in the order you select them.
           <p>Originally for RNA-seq count data; uses negative-binomial models.
              Data are rounded to integer counts before fitting.</p>
         ")
-      ))
-    })
-
-    shiny::observeEvent(input$info_contrasts, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Contrast Selection", easyClose = TRUE,
-        footer = shiny::modalButton("Close"),
-        shiny::HTML("
+    ))
+  })
+  shiny::observeEvent(input$info_contrasts, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Contrast Selection", easyClose = TRUE,
+      footer = shiny::modalButton("Close"),
+      shiny::HTML("
           <h4>Automatic pairwise contrasts</h4>
           <p>Each contrast compares two groups: <code>GroupA - GroupB</code>
           tests whether GroupA differs from GroupB. Positive logFC means
@@ -2221,245 +2269,244 @@ Methods are applied left-to-right in the order you select them.
           contrasts (e.g. <code>A375.ND.DabTram</code> for
           <code>A375 ND DabTram</code>).</p>
         ")
-      ))
-    })
+    ))
+  })
+  shiny::observeEvent(input$run_diff_analysis, {
+    # At least one of: checkbox contrasts or custom text contrasts must be present
+    checkbox_contrasts <- input$selected_contrasts
+    custom_raw <- trimws(input$custom_contrasts_text)
+    custom_contrasts <- if (nzchar(custom_raw)) {
+      lines <- trimws(strsplit(custom_raw, "\n")[[1]])
+      lines[nzchar(lines) & !startsWith(lines, "#")]
+    } else {
+      character(0)
+    }
+    all_contrasts <- unique(c(checkbox_contrasts, custom_contrasts))
 
-    # ---- Run differential analysis ---------------------------------------
-    shiny::observeEvent(input$run_diff_analysis, {
-      # At least one of: checkbox contrasts or custom text contrasts must be present
-      checkbox_contrasts <- input$selected_contrasts
-      custom_raw <- trimws(input$custom_contrasts_text)
-      custom_contrasts <- if (nzchar(custom_raw)) {
-        lines <- trimws(strsplit(custom_raw, "\n")[[1]])
-        lines[nzchar(lines) & !startsWith(lines, "#")]
-      } else {
-        character(0)
-      }
-      all_contrasts <- unique(c(checkbox_contrasts, custom_contrasts))
-
-      if (length(all_contrasts) == 0) {
-        shiny::showNotification(
-          "Select at least one contrast or enter a custom contrast.",
-          type = "warning", duration = 6
-        )
-        return()
-      }
-
-      shiny::req(values$normalized_data)
-      tryCatch(
-        {
-          md <- values$normalized_data$metadata
-
-          results <- perform_differential_analysis(
-            data_matrix    = values$normalized_data$numeric_data,
-            metadata       = md,
-            group_column   = input$group_col_diff,
-            contrasts_list = all_contrasts,
-            method         = input$diff_method
-          )
-          values$diff_results <- results
-
-          contrast_choices <- names(results$results)
-          for (id in c(
-            "contrast_display", "contrast_select",
-            "enrichment_contrast_select",
-            "enrichment_contrast", "enrichment_viz_contrast"
-          )) {
-            shiny::updateSelectInput(session, id,
-              choices  = contrast_choices,
-              selected = contrast_choices[1]
-            )
-          }
-          shiny::showNotification(
-            paste("Differential analysis completed using", input$diff_method),
-            type = "message"
-          )
-        },
-        error = function(e) show_error(e, "Differential analysis")
+    if (length(all_contrasts) == 0) {
+      shiny::showNotification(
+        "Select at least one contrast or enter a custom contrast.",
+        type = "warning", duration = 6
       )
-    })
+      return()
+    }
 
-    output$diff_summary <- shiny::renderText({
-      if (is.null(values$diff_results)) {
-        return("No results yet. Run the analysis first.")
-      }
-
-      out <- paste0(
-        "Method: ", values$diff_results$method, "\n",
-        "Contrasts: ", length(values$diff_results$results), "\n\n"
-      )
-      for (nm in names(values$diff_results$results)) {
-        res <- values$diff_results$results[[nm]]
-        n_sig <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
-        n_up <- sum(res$adj.P.Val < 0.05 & res$logFC > 0, na.rm = TRUE)
-        n_down <- sum(res$adj.P.Val < 0.05 & res$logFC < 0, na.rm = TRUE)
-        out <- paste0(
-          out,
-          "=== ", nm, " ===\n",
-          "  Total: ", nrow(res), "\n",
-          "  Significant (adj.P < 0.05): ", n_sig, "\n",
-          "    Increased abundance: ", n_up, "\n",
-          "    Decreased abundance: ", n_down, "\n\n"
-        )
-      }
-      out
-    })
-
-    output$diff_results_table <- DT::renderDataTable(
+    shiny::req(values$normalized_data)
+    tryCatch(
       {
-        shiny::req(values$diff_results, input$contrast_display)
-        tryCatch(
-          {
-            res <- values$diff_results$results[[input$contrast_display]]
-            if (is.null(res)) {
-              return(DT::datatable(data.frame(Message = "No results for this contrast")))
-            }
-            if (!is.data.frame(res)) res <- as.data.frame(res)
-            if (!"Lipid" %in% colnames(res)) {
-              res <- data.frame(Lipid = rownames(res), res, stringsAsFactors = FALSE)
-            }
+        md <- values$normalized_data$metadata
 
-            num_cols <- vapply(res, is.numeric, logical(1))
-            res[num_cols] <- lapply(res[num_cols], round, 4)
+        results <- perform_differential_analysis(
+          data_matrix    = values$normalized_data$numeric_data,
+          metadata       = md,
+          group_column   = input$group_col_diff,
+          contrasts_list = all_contrasts,
+          method         = input$diff_method
+        )
+        values$diff_results <- results
 
-            DT::datatable(res,
-              options = list(
-                pageLength = 15, scrollX = TRUE,
-                scrollY = "400px", searching = TRUE
-              ),
-              rownames = FALSE,
-              filter = "top",
-              selection = "multiple"
-            )
-          },
-          error = function(e) {
-            DT::datatable(data.frame(Error = paste("Display error:", e$message)))
-          }
+        contrast_choices <- names(results$results)
+        for (id in c(
+          "contrast_display", "contrast_select",
+          "enrichment_contrast_select",
+          "enrichment_contrast", "enrichment_viz_contrast"
+        )) {
+          shiny::updateSelectInput(session, id,
+            choices  = contrast_choices,
+            selected = contrast_choices[1]
+          )
+        }
+        shiny::showNotification(
+          paste("Differential analysis completed using", input$diff_method),
+          type = "message"
         )
       },
-      server = TRUE
+      error = function(e) show_error(e, "Differential analysis")
     )
+  })
+  output$diff_summary <- shiny::renderText({
+    if (is.null(values$diff_results)) {
+      return("No results yet. Run the analysis first.")
+    }
 
-    # ---- Results visualization ------------------------------------------
-    shiny::observeEvent(input$create_viz, {
-      shiny::req(values$diff_results, input$contrast_select)
+    out <- paste0(
+      "Method: ", values$diff_results$method, "\n",
+      "Contrasts: ", length(values$diff_results$results), "\n\n"
+    )
+    for (nm in names(values$diff_results$results)) {
+      res <- values$diff_results$results[[nm]]
+      n_sig <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
+      n_up <- sum(res$adj.P.Val < 0.05 & res$logFC > 0, na.rm = TRUE)
+      n_down <- sum(res$adj.P.Val < 0.05 & res$logFC < 0, na.rm = TRUE)
+      out <- paste0(
+        out,
+        "=== ", nm, " ===\n",
+        "  Total: ", nrow(res), "\n",
+        "  Significant (adj.P < 0.05): ", n_sig, "\n",
+        "    Increased abundance: ", n_up, "\n",
+        "    Decreased abundance: ", n_down, "\n\n"
+      )
+    }
+    out
+  })
+  output$diff_results_table <- DT::renderDataTable(
+    {
+      shiny::req(values$diff_results, input$contrast_display)
       tryCatch(
         {
-          sel_res <- values$diff_results$results[[input$contrast_select]]
+          res <- values$diff_results$results[[input$contrast_display]]
+          if (is.null(res)) {
+            return(DT::datatable(data.frame(Message = "No results for this contrast")))
+          }
+          if (!is.data.frame(res)) res <- as.data.frame(res)
+          if (!"Lipid" %in% colnames(res)) {
+            res <- data.frame(Lipid = rownames(res), res, stringsAsFactors = FALSE)
+          }
 
-          if (input$viz_type == "volcano") {
-            cls <- if (isTRUE(input$color_by_class)) values$classification_data else NULL
-            clr_by <- if (isTRUE(input$color_by_class)) input$color_column else NULL
+          num_cols <- vapply(res, is.numeric, logical(1))
+          res[num_cols] <- lapply(res[num_cols], round, 4)
 
-            plot <- create_volcano_plot_labeled(
-              sel_res,
-              title = paste("Volcano Plot:", input$contrast_select),
-              logfc_threshold = input$logfc_threshold,
-              pval_threshold = input$pval_threshold,
-              top_labels = input$top_labels,
-              classification_data = cls,
-              color_by = clr_by
+          DT::datatable(res,
+            options = list(
+              pageLength = 15, scrollX = TRUE,
+              scrollY = "400px", searching = TRUE
+            ),
+            rownames = FALSE,
+            filter = "top",
+            selection = "multiple"
+          )
+        },
+        error = function(e) {
+          DT::datatable(data.frame(Error = paste("Display error:", e$message)))
+        }
+      )
+    },
+    server = TRUE
+  )
+}
+
+#' @noRd
+.setup_results_viz_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$create_viz, {
+    shiny::req(values$diff_results, input$contrast_select)
+    tryCatch(
+      {
+        sel_res <- values$diff_results$results[[input$contrast_select]]
+
+        if (input$viz_type == "volcano") {
+          cls <- if (isTRUE(input$color_by_class)) values$classification_data else NULL
+          clr_by <- if (isTRUE(input$color_by_class)) input$color_column else NULL
+
+          plot <- create_volcano_plot_labeled(
+            sel_res,
+            title = paste("Volcano Plot:", input$contrast_select),
+            logfc_threshold = input$logfc_threshold,
+            pval_threshold = input$pval_threshold,
+            top_labels = input$top_labels,
+            classification_data = cls,
+            color_by = clr_by
+          )
+          values$current_results_plot <- plot
+          add_to_history(
+            "Results",
+            paste("Volcano", input$contrast_select), plot
+          )
+          output$results_plot <- shiny::renderPlot(plot)
+        } else if (input$viz_type == "heatmap") {
+          sig_idx <- which(sel_res$adj.P.Val < 0.05 & abs(sel_res$logFC) > 1)
+
+          if (length(sig_idx) == 0) {
+            output$results_plot <- shiny::renderPlot(
+              ggplot2::ggplot() +
+                ggplot2::annotate("text",
+                  x = 0.5, y = 0.5,
+                  label = "No significant features found",
+                  size = 6
+                ) +
+                ggplot2::theme_void()
             )
-            values$current_results_plot <- plot
-            add_to_history(
-              "Results",
-              paste("Volcano", input$contrast_select), plot
+          } else {
+            n_feat <- min(length(sig_idx), input$heatmap_top_n)
+            feat_names <- rownames(sel_res)[sig_idx[seq_len(n_feat)]]
+            avail <- intersect(
+              feat_names,
+              colnames(values$normalized_data$numeric_data)
             )
-            output$results_plot <- shiny::renderPlot(plot)
-          } else if (input$viz_type == "heatmap") {
-            sig_idx <- which(sel_res$adj.P.Val < 0.05 & abs(sel_res$logFC) > 1)
 
-            if (length(sig_idx) == 0) {
+            if (length(avail) == 0) {
               output$results_plot <- shiny::renderPlot(
                 ggplot2::ggplot() +
                   ggplot2::annotate("text",
                     x = 0.5, y = 0.5,
-                    label = "No significant features found",
-                    size = 6
+                    label = paste0(
+                      "No significant lipid names matched the data matrix.\n",
+                      "Check that differential analysis was run on the\n",
+                      "same normalised data currently loaded."
+                    ),
+                    size = 5
                   ) +
                   ggplot2::theme_void()
               )
             } else {
-              n_feat <- min(length(sig_idx), input$heatmap_top_n)
-              feat_names <- rownames(sel_res)[sig_idx[seq_len(n_feat)]]
-              avail <- intersect(
-                feat_names,
-                colnames(values$normalized_data$numeric_data)
+              # Safely filter to the contrast groups.
+              # Only attempt simple "A - B" contrasts; for complex expressions
+              # (custom contrasts with parentheses/arithmetic) show all samples.
+              group_vals <- as.character(
+                values$normalized_data$metadata[[input$group_col_diff]]
               )
-
-              if (length(avail) == 0) {
-                output$results_plot <- shiny::renderPlot(
-                  ggplot2::ggplot() +
-                    ggplot2::annotate("text",
-                      x = 0.5, y = 0.5,
-                      label = paste0(
-                        "No significant lipid names matched the data matrix.\n",
-                        "Check that differential analysis was run on the\n",
-                        "same normalised data currently loaded."
-                      ),
-                      size = 5
-                    ) +
-                    ggplot2::theme_void()
-                )
+              is_simple <- !grepl("[()*/+]", input$contrast_select)
+              mask <- if (is_simple) {
+                parts <- trimws(strsplit(input$contrast_select, " - ")[[1]])
+                group_vals %in% parts
               } else {
-                # Safely filter to the contrast groups.
-                # Only attempt simple "A - B" contrasts; for complex expressions
-                # (custom contrasts with parentheses/arithmetic) show all samples.
-                group_vals <- as.character(
-                  values$normalized_data$metadata[[input$group_col_diff]]
-                )
-                is_simple <- !grepl("[()*/+]", input$contrast_select)
-                mask <- if (is_simple) {
-                  parts <- trimws(strsplit(input$contrast_select, " - ")[[1]])
-                  group_vals %in% parts
-                } else {
-                  rep(TRUE, length(group_vals))
-                }
-                # Require at least 2 samples after filtering; otherwise show all
-                if (sum(mask) < 2L) mask <- rep(TRUE, length(group_vals))
-
-                filt_dat <- values$normalized_data$numeric_data[mask, avail, drop = FALSE]
-                filt_md  <- values$normalized_data$metadata[mask, , drop = FALSE]
-
-                hm <- create_heatmap_robust(
-                  t(filt_dat), filt_md, input$group_col_diff,
-                  top_n = length(avail),
-                  title = paste("Heatmap:", input$contrast_select)
-                )
-                values$current_results_plot <- hm
-                output$results_plot <- shiny::renderPlot({
-                  if (inherits(hm, "pheatmap")) {
-                    grid::grid.draw(hm$gtable)
-                  } else {
-                    hm
-                  }
-                })
+                rep(TRUE, length(group_vals))
               }
+              # Require at least 2 samples after filtering; otherwise show all
+              if (sum(mask) < 2L) mask <- rep(TRUE, length(group_vals))
+
+              filt_dat <- values$normalized_data$numeric_data[mask, avail, drop = FALSE]
+              filt_md <- values$normalized_data$metadata[mask, , drop = FALSE]
+
+              hm <- create_heatmap_robust(
+                t(filt_dat), filt_md, input$group_col_diff,
+                top_n = length(avail),
+                title = paste("Heatmap:", input$contrast_select)
+              )
+              values$current_results_plot <- hm
+              output$results_plot <- shiny::renderPlot({
+                if (inherits(hm, "pheatmap")) {
+                  grid::grid.draw(hm$gtable)
+                } else {
+                  hm
+                }
+              })
             }
           }
-        },
-        error = function(e) show_error(e, "Creating visualization")
-      )
-    })
+        }
+      },
+      error = function(e) show_error(e, "Creating visualization")
+    )
+  })
+}
 
-    # ---- Enrichment ------------------------------------------------------
-    shiny::observeEvent(input$load_custom_sets, {
-      shiny::req(input$custom_enrichment_file)
-      tryCatch(
-        {
-          values$custom_enrichment_sets <-
-            load_custom_enrichment_sets(input$custom_enrichment_file$datapath)
-          shiny::showNotification("Custom enrichment sets loaded!", type = "message")
-        },
-        error = function(e) show_error(e, "Loading custom enrichment sets")
-      )
-    })
-
-    shiny::observeEvent(input$info_custom_sets, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Custom Enrichment Sets", easyClose = TRUE,
-        footer = shiny::modalButton("Close"),
-        shiny::HTML("
+#' @noRd
+.setup_enrichment_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$load_custom_sets, {
+    shiny::req(input$custom_enrichment_file)
+    tryCatch(
+      {
+        values$custom_enrichment_sets <-
+          load_custom_enrichment_sets(input$custom_enrichment_file$datapath)
+        shiny::showNotification("Custom enrichment sets loaded!", type = "message")
+      },
+      error = function(e) show_error(e, "Loading custom enrichment sets")
+    )
+  })
+  shiny::observeEvent(input$info_custom_sets, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Custom Enrichment Sets", easyClose = TRUE,
+      footer = shiny::modalButton("Close"),
+      shiny::HTML("
           <p>Upload a CSV with two columns:</p>
           <ul>
             <li><code>Lipid</code>: must match the lipid names in your data exactly</li>
@@ -2467,148 +2514,150 @@ Methods are applied left-to-right in the order you select them.
           </ul>
           <p>A lipid can appear in multiple rows to belong to several sets.</p>
         ")
-      ))
-    })
-
-    shiny::observeEvent(input$run_enrichment, {
-      shiny::req(values$diff_results, values$classification)
-      tryCatch(
-        {
-          cls <- if (values$use_custom_classification) {
-            values$custom_classification
-          } else {
-            values$classification
-          }
-
-          values$enrichment_results <- perform_enrichment_analysis(
-            results_list = values$diff_results$results,
-            classification_data = cls,
-            min_set_size = input$min_set_size,
-            max_set_size = input$max_set_size,
-            custom_sets = values$custom_enrichment_sets
-          )
-          shiny::showNotification("Enrichment analysis completed!", type = "message")
-        },
-        error = function(e) {
-          if (grepl("corrupt|fgsea", e$message, ignore.case = TRUE)) {
-            shiny::showNotification(
-              paste(
-                "fgsea error - try reinstalling: install.packages('fgsea')\n",
-                e$message
-              ),
-              type = "error", duration = 15
-            )
-          } else {
-            show_error(e, "Enrichment analysis")
-          }
+    ))
+  })
+  shiny::observeEvent(input$run_enrichment, {
+    shiny::req(values$diff_results, values$classification)
+    tryCatch(
+      {
+        cls <- if (values$use_custom_classification) {
+          values$custom_classification
+        } else {
+          values$classification
         }
-      )
-    })
 
-    output$enrichment_results_table <- DT::renderDataTable({
-      shiny::req(
-        values$enrichment_results,
-        input$enrichment_contrast, input$enrichment_type
-      )
-      tryCatch(
-        {
-          cr <- values$enrichment_results[[input$enrichment_contrast]]
-          if (!is.null(cr) && input$enrichment_type %in% names(cr)) {
-            ed <- cr[[input$enrichment_type]]
-            if (nrow(ed) > 0) {
-              DT::datatable(ed, options = list(scrollX = TRUE))
-            } else {
-              DT::datatable(data.frame(Message = "No results for this type"))
-            }
-          } else {
-            DT::datatable(data.frame(Message = "Enrichment type not available"))
-          }
-        },
-        error = function(e) {
-          DT::datatable(data.frame(Error = paste("Display error:", e$message)))
-        }
-      )
-    })
-
-    shiny::observeEvent(input$create_enrichment_viz, {
-      shiny::req(
-        values$enrichment_results,
-        input$enrichment_viz_contrast, input$enrichment_viz_type
-      )
-      tryCatch(
-        {
-          cr <- values$enrichment_results[[input$enrichment_viz_contrast]]
-          if (!is.null(cr) && input$enrichment_viz_type %in% names(cr)) {
-            ed <- cr[[input$enrichment_viz_type]]
-
-            plot <- if (nrow(ed) == 0) {
-              ggplot2::ggplot() +
-                ggplot2::annotate("text",
-                  x = 0.5, y = 0.5,
-                  label = "No enrichment results"
-                ) +
-                ggplot2::theme_void()
-            } else if (input$enrichment_plot_type == "dotplot") {
-              create_enrichment_dotplot(
-                ed,
-                title = paste(
-                  "Enrichment:", input$enrichment_viz_contrast,
-                  "-", input$enrichment_viz_type
-                ),
-                max_pathways = input$max_pathways
-              )
-            } else {
-              create_enrichment_barplot(
-                ed,
-                title = paste(
-                  "Enrichment:", input$enrichment_viz_contrast,
-                  "-", input$enrichment_viz_type
-                ),
-                max_pathways = input$max_pathways
-              )
-            }
-
-            values$current_enrichment_plot <- plot
-            add_to_history(
-              "Enrichment",
-              paste(
-                "Enrichment", input$enrichment_viz_contrast,
-                input$enrichment_viz_type
-              ), plot
-            )
-            output$enrichment_plot <- shiny::renderPlot(plot)
-          }
-        },
-        error = function(e) show_error(e, "Enrichment visualization")
-      )
-    })
-
-    # ---- Preprocessing: missing value summary ----------------------------
-    output$missing_value_summary <- shiny::renderText({
-      if (is.null(values$normalized_data)) {
-        return("Apply normalisation first, then return here to impute.")
-      }
-      m       <- values$normalized_data$numeric_data
-      n_miss  <- sum(is.na(m))
-      pct     <- round(100 * n_miss / length(m), 2)
-      imputed <- !is.null(values$pre_impute_data)
-      paste0(
-        "Total values  : ", length(m), "\n",
-        "Missing (NA)  : ", n_miss, " (", pct, "%)\n",
-        "Imputation    : ", if (imputed) "Applied" else "Not yet applied"
-      )
-    })
-
-    # ---- Preprocessing: imputation ---------------------------------------
-    shiny::observeEvent(input$run_imputation, {
-      if (is.null(values$normalized_data)) {
-        shiny::showNotification(
-          "Please apply normalisation first, then return here to impute.",
-          type = "warning", duration = 6
+        values$enrichment_results <- perform_enrichment_analysis(
+          results_list = values$diff_results$results,
+          classification_data = cls,
+          min_set_size = input$min_set_size,
+          max_set_size = input$max_set_size,
+          custom_sets = values$custom_enrichment_sets
         )
-        return()
+        shiny::showNotification("Enrichment analysis completed!", type = "message")
+      },
+      error = function(e) {
+        if (grepl("corrupt|fgsea", e$message, ignore.case = TRUE)) {
+          shiny::showNotification(
+            paste(
+              "fgsea error - try reinstalling: install.packages('fgsea')\n",
+              e$message
+            ),
+            type = "error", duration = 15
+          )
+        } else {
+          show_error(e, "Enrichment analysis")
+        }
       }
-      tryCatch({
+    )
+  })
+  output$enrichment_results_table <- DT::renderDataTable({
+    shiny::req(
+      values$enrichment_results,
+      input$enrichment_contrast, input$enrichment_type
+    )
+    tryCatch(
+      {
+        cr <- values$enrichment_results[[input$enrichment_contrast]]
+        if (!is.null(cr) && input$enrichment_type %in% names(cr)) {
+          ed <- cr[[input$enrichment_type]]
+          if (nrow(ed) > 0) {
+            DT::datatable(ed, options = list(scrollX = TRUE))
+          } else {
+            DT::datatable(data.frame(Message = "No results for this type"))
+          }
+        } else {
+          DT::datatable(data.frame(Message = "Enrichment type not available"))
+        }
+      },
+      error = function(e) {
+        DT::datatable(data.frame(Error = paste("Display error:", e$message)))
+      }
+    )
+  })
+}
+
+#' @noRd
+.setup_enrichment_viz_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$create_enrichment_viz, {
+    shiny::req(
+      values$enrichment_results,
+      input$enrichment_viz_contrast, input$enrichment_viz_type
+    )
+    tryCatch(
+      {
+        cr <- values$enrichment_results[[input$enrichment_viz_contrast]]
+        if (!is.null(cr) && input$enrichment_viz_type %in% names(cr)) {
+          ed <- cr[[input$enrichment_viz_type]]
+
+          plot <- if (nrow(ed) == 0) {
+            ggplot2::ggplot() +
+              ggplot2::annotate("text",
+                x = 0.5, y = 0.5,
+                label = "No enrichment results"
+              ) +
+              ggplot2::theme_void()
+          } else if (input$enrichment_plot_type == "dotplot") {
+            create_enrichment_dotplot(
+              ed,
+              title = paste(
+                "Enrichment:", input$enrichment_viz_contrast,
+                "-", input$enrichment_viz_type
+              ),
+              max_pathways = input$max_pathways
+            )
+          } else {
+            create_enrichment_barplot(
+              ed,
+              title = paste(
+                "Enrichment:", input$enrichment_viz_contrast,
+                "-", input$enrichment_viz_type
+              ),
+              max_pathways = input$max_pathways
+            )
+          }
+
+          values$current_enrichment_plot <- plot
+          add_to_history(
+            "Enrichment",
+            paste(
+              "Enrichment", input$enrichment_viz_contrast,
+              input$enrichment_viz_type
+            ), plot
+          )
+          output$enrichment_plot <- shiny::renderPlot(plot)
+        }
+      },
+      error = function(e) show_error(e, "Enrichment visualization")
+    )
+  })
+}
+
+#' @noRd
+.setup_imputation_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  output$missing_value_summary <- shiny::renderText({
+    if (is.null(values$normalized_data)) {
+      return("Apply normalisation first, then return here to impute.")
+    }
+    m <- values$normalized_data$numeric_data
+    n_miss <- sum(is.na(m))
+    pct <- round(100 * n_miss / length(m), 2)
+    imputed <- !is.null(values$pre_impute_data)
+    paste0(
+      "Total values  : ", length(m), "\n",
+      "Missing (NA)  : ", n_miss, " (", pct, "%)\n",
+      "Imputation    : ", if (imputed) "Applied" else "Not yet applied"
+    )
+  })
+  shiny::observeEvent(input$run_imputation, {
+    if (is.null(values$normalized_data)) {
+      shiny::showNotification(
+        "Please apply normalisation first, then return here to impute.",
+        type = "warning", duration = 6
+      )
+      return()
+    }
+    tryCatch(
+      {
         k_val <- if (input$imputation_method == "knn") input$imputation_k else 5L
 
         # Snapshot for reset
@@ -2630,105 +2679,116 @@ Methods are applied left-to-right in the order you select them.
           paste("Imputation applied to normalised data:", input$imputation_method),
           type = "message"
         )
-      }, error = function(e) show_error(e, "Imputation"))
-    })
+      },
+      error = function(e) show_error(e, "Imputation")
+    )
+  })
+  shiny::observeEvent(input$reset_imputation, {
+    if (is.null(values$pre_impute_data)) {
+      shiny::showNotification("No imputation to reset.", type = "warning")
+      return()
+    }
+    values$normalized_data <- values$pre_impute_data
+    values$pre_impute_data <- NULL
+    shiny::showNotification(
+      "Imputation reset. Pre-imputation normalised data restored.",
+      type = "message"
+    )
+  })
+  shiny::observeEvent(input$info_imputation, {
+    descs <- get_imputation_descriptions()
+    html_rows <- paste(
+      vapply(names(descs), function(m) {
+        paste0("<dt><strong>", m, "</strong></dt><dd>", descs[[m]], "</dd>")
+      }, character(1)),
+      collapse = "\n"
+    )
+    shiny::showModal(shiny::modalDialog(
+      title     = "Imputation Method Descriptions",
+      size      = "l",
+      easyClose = TRUE,
+      footer    = shiny::modalButton("Close"),
+      shiny::HTML(paste0("<dl class='dl-horizontal'>", html_rows, "</dl>"))
+    ))
+  })
+}
 
-    shiny::observeEvent(input$reset_imputation, {
-      if (is.null(values$pre_impute_data)) {
-        shiny::showNotification("No imputation to reset.", type = "warning")
-        return()
-      }
-      values$normalized_data  <- values$pre_impute_data
-      values$pre_impute_data  <- NULL
+#' @noRd
+.setup_batch_correction_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  shiny::observeEvent(input$run_batch_correction, {
+    # -- Guard 1: normalisation must be applied first ----------------------
+    if (is.null(values$normalized_data)) {
       shiny::showNotification(
-        "Imputation reset. Pre-imputation normalised data restored.",
-        type = "message"
+        "Please apply normalisation first (Normalisation tab) before batch correction.",
+        type = "warning", duration = 6
       )
-    })
+      return()
+    }
 
-    shiny::observeEvent(input$info_imputation, {
-      descs    <- get_imputation_descriptions()
-      html_rows <- paste(
-        vapply(names(descs), function(m) {
-          paste0("<dt><strong>", m, "</strong></dt><dd>", descs[[m]], "</dd>")
-        }, character(1)),
-        collapse = "\n"
+    # -- Guard 2: batch column must exist in metadata ----------------------
+    md <- values$normalized_data$metadata
+    if (is.null(input$batch_column) || !nzchar(input$batch_column) ||
+      !input$batch_column %in% colnames(md)) {
+      shiny::showNotification(
+        paste0(
+          "No valid batch column selected. Add a batch column to your ",
+          "CSV (e.g. 'Batch', 'Run', 'Plate') and reload the data."
+        ),
+        type = "warning", duration = 8
       )
-      shiny::showModal(shiny::modalDialog(
-        title     = "Imputation Method Descriptions",
-        size      = "l",
-        easyClose = TRUE,
-        footer    = shiny::modalButton("Close"),
-        shiny::HTML(paste0("<dl class='dl-horizontal'>", html_rows, "</dl>"))
-      ))
-    })
+      return()
+    }
 
-    # ---- Preprocessing: batch correction --------------------------------
-    shiny::observeEvent(input$run_batch_correction, {
-      # -- Guard 1: normalisation must be applied first ----------------------
-      if (is.null(values$normalized_data)) {
-        shiny::showNotification(
-          "Please apply normalisation first (Normalisation tab) before batch correction.",
-          type = "warning", duration = 6
-        )
-        return()
-      }
+    # -- Guard 3: batch column must have 2...(n-1) unique values -----------
+    batch_vals <- md[[input$batch_column]]
+    n_batches <- length(unique(batch_vals[!is.na(batch_vals)]))
+    n_samples <- nrow(md)
 
-      # -- Guard 2: batch column must exist in metadata ----------------------
-      md <- values$normalized_data$metadata
-      if (is.null(input$batch_column) || !nzchar(input$batch_column) ||
-          !input$batch_column %in% colnames(md)) {
-        shiny::showNotification(
-          paste0("No valid batch column selected. Add a batch column to your ",
-                 "CSV (e.g. 'Batch', 'Run', 'Plate') and reload the data."),
-          type = "warning", duration = 8
-        )
-        return()
-      }
+    if (n_batches < 2L) {
+      shiny::showNotification(
+        paste0(
+          "The selected batch column ('", input$batch_column,
+          "') has only one unique value. ",
+          "Choose a column where samples are labelled by their batch ",
+          "(e.g. run date, plate ID, instrument run)."
+        ),
+        type = "error", duration = 10
+      )
+      return()
+    }
+    if (n_batches == n_samples) {
+      shiny::showNotification(
+        paste0(
+          "Every sample has a unique value in '", input$batch_column,
+          "'. Batch correction requires multiple samples per batch. ",
+          "Select a column that groups samples into 2 or more shared batches."
+        ),
+        type = "error", duration = 10
+      )
+      return()
+    }
 
-      # -- Guard 3: batch column must have 2...(n-1) unique values -----------
-      batch_vals <- md[[input$batch_column]]
-      n_batches  <- length(unique(batch_vals[!is.na(batch_vals)]))
-      n_samples  <- nrow(md)
+    # -- Guard 4: warn if batch column is same as group column -------------
+    # This is statistically questionable (removes biology alongside batch),
+    # but we allow it with a warning. The collinearity check inside
+    # correct_batch_effects() will handle complete confounding gracefully.
+    if (!is.null(input$batch_group_column) &&
+      input$batch_column == input$batch_group_column) {
+      shiny::showNotification(
+        paste0(
+          "Note: batch column and group column are the same ('",
+          input$batch_column, "'). Group protection will be disabled ",
+          "to avoid collinearity. Consider adding a dedicated batch ",
+          "column (e.g. run date or plate ID) to your data file."
+        ),
+        type = "warning", duration = 10
+      )
+    }
 
-      if (n_batches < 2L) {
-        shiny::showNotification(
-          paste0("The selected batch column ('", input$batch_column,
-                 "') has only one unique value. ",
-                 "Choose a column where samples are labelled by their batch ",
-                 "(e.g. run date, plate ID, instrument run)."),
-          type = "error", duration = 10
-        )
-        return()
-      }
-      if (n_batches == n_samples) {
-        shiny::showNotification(
-          paste0("Every sample has a unique value in '", input$batch_column,
-                 "'. Batch correction requires multiple samples per batch. ",
-                 "Select a column that groups samples into 2 or more shared batches."),
-          type = "error", duration = 10
-        )
-        return()
-      }
-
-      # -- Guard 4: warn if batch column is same as group column -------------
-      # This is statistically questionable (removes biology alongside batch),
-      # but we allow it with a warning. The collinearity check inside
-      # correct_batch_effects() will handle complete confounding gracefully.
-      if (!is.null(input$batch_group_column) &&
-          input$batch_column == input$batch_group_column) {
-        shiny::showNotification(
-          paste0("Note: batch column and group column are the same ('",
-                 input$batch_column, "'). Group protection will be disabled ",
-                 "to avoid collinearity. Consider adding a dedicated batch ",
-                 "column (e.g. run date or plate ID) to your data file."),
-          type = "warning", duration = 10
-        )
-      }
-
-      tryCatch({
+    tryCatch(
+      {
         # Snapshot metadata before any assignment (avoids reactive mid-read)
-        snap_md  <- values$normalized_data$metadata
+        snap_md <- values$normalized_data$metadata
         snap_mat <- values$normalized_data$numeric_data
 
         # Store full snapshot for reset
@@ -2763,39 +2823,43 @@ Methods are applied left-to-right in the order you select them.
           )
         } else {
           shiny::showNotification(
-            paste0("Batch correction applied using ", input$batch_method,
-                   ". Verify the result with a PCA plot."),
+            paste0(
+              "Batch correction applied using ", input$batch_method,
+              ". Verify the result with a PCA plot."
+            ),
             type = "message", duration = 6
           )
         }
-      }, error = function(e) {
+      },
+      error = function(e) {
         # Roll back snapshot so normalized_data stays valid
         values$normalized_data <- values$pre_batch_data
-        values$pre_batch_data  <- NULL
+        values$pre_batch_data <- NULL
         shiny::showNotification(
-          paste0("Batch correction failed: ", conditionMessage(e),
-                 ". Check that batch and group columns are not perfectly confounded."),
+          paste0(
+            "Batch correction failed: ", conditionMessage(e),
+            ". Check that batch and group columns are not perfectly confounded."
+          ),
           type = "error", duration = 12
         )
-      })
-    })
-
-    shiny::observeEvent(input$reset_batch_correction, {
-      shiny::req(values$pre_batch_data)
-      values$normalized_data <- values$pre_batch_data
-      values$pre_batch_data  <- NULL
-      shiny::showNotification(
-        "Batch correction reset. Pre-batch normalised data restored.",
-        type = "message"
-      )
-    })
-
-    shiny::observeEvent(input$info_batch, {
-      shiny::showModal(shiny::modalDialog(
-        title     = "Batch Effect Correction",
-        easyClose = TRUE,
-        footer    = shiny::modalButton("Close"),
-        shiny::HTML("
+      }
+    )
+  })
+  shiny::observeEvent(input$reset_batch_correction, {
+    shiny::req(values$pre_batch_data)
+    values$normalized_data <- values$pre_batch_data
+    values$pre_batch_data <- NULL
+    shiny::showNotification(
+      "Batch correction reset. Pre-batch normalised data restored.",
+      type = "message"
+    )
+  })
+  shiny::observeEvent(input$info_batch, {
+    shiny::showModal(shiny::modalDialog(
+      title     = "Batch Effect Correction",
+      easyClose = TRUE,
+      footer    = shiny::modalButton("Close"),
+      shiny::HTML("
           <h4>limma - removeBatchEffect</h4>
           <p>Fits a linear model that includes batch as a covariate and
           returns residuals without the batch component. Fast and reliable
@@ -2811,459 +2875,441 @@ Methods are applied left-to-right in the order you select them.
           plot (Normalised Data Visualization tab). Samples should cluster by
           biological group, not by batch, after correction.</p>
         ")
-      ))
-    })
+    ))
+  })
+}
 
-    # ---- Preprocessing status -------------------------------------------
-    output$preprocessing_status <- shiny::renderText({
-      paste0(
-        "Data loaded      : ", !is.null(values$raw_data), "\n",
-        "Normalisation    : ",
-        if (!is.null(values$normalized_data)) "Applied" else "Not applied", "\n",
-        "Imputation       : ",
-        if (!is.null(values$pre_impute_data)) "Applied" else "Not applied", "\n",
-        "Batch correction : ",
-        if (!is.null(values$pre_batch_data)) "Applied" else "Not applied"
+#' @noRd
+.setup_status_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  output$preprocessing_status <- shiny::renderText({
+    paste0(
+      "Data loaded      : ", !is.null(values$raw_data), "\n",
+      "Normalisation    : ",
+      if (!is.null(values$normalized_data)) "Applied" else "Not applied", "\n",
+      "Imputation       : ",
+      if (!is.null(values$pre_impute_data)) "Applied" else "Not applied", "\n",
+      "Batch correction : ",
+      if (!is.null(values$pre_batch_data)) "Applied" else "Not applied"
+    )
+  })
+  output$report_status <- shiny::renderText({
+    paste0(
+      "Data loaded:             ", !is.null(values$raw_data), "\n",
+      "Normalization applied:   ", !is.null(values$normalized_data), "\n",
+      "Diff. analysis done:     ", !is.null(values$diff_results), "\n",
+      "Enrichment done:         ", !is.null(values$enrichment_results), "\n",
+      "Plots in history:        ", length(values$plot_history)
+    )
+  })
+  output$plot_history_status <- shiny::renderText({
+    n <- length(values$plot_history)
+    if (n == 0) {
+      return("No plots generated yet.")
+    }
+    entries <- vapply(values$plot_history, function(e) {
+      paste0("[", e$section, "] ", e$label)
+    }, character(1))
+    paste(c(paste(n, "plot(s) will be included:"), entries), collapse = "\n")
+  })
+}
+
+#' @noRd
+.setup_plot_download_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  output$download_raw_plot <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (identical(input$img_format_raw, "pdf")) "pdf" else "png"
+      .dl_name("raw", input$view_mode, input$plot_type, ext = ext)
+    },
+    content = function(file) {
+      shiny::req(values$current_raw_plot)
+      .save_plot(values$current_raw_plot, file, input$img_format_raw)
+    }
+  )
+  output$download_norm_plot <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (identical(input$img_format_norm, "pdf")) "pdf" else "png"
+      .dl_name("normalized", input$norm_plot_type,
+        if (!is.null(input$ellipse_type)) input$ellipse_type else "",
+        ext = ext
       )
-    })
-
-    # ---- Report status ---------------------------------------------------
-    output$report_status <- shiny::renderText({
-      paste0(
-        "Data loaded:             ", !is.null(values$raw_data), "\n",
-        "Normalization applied:   ", !is.null(values$normalized_data), "\n",
-        "Diff. analysis done:     ", !is.null(values$diff_results), "\n",
-        "Enrichment done:         ", !is.null(values$enrichment_results), "\n",
-        "Plots in history:        ", length(values$plot_history)
+    },
+    content = function(file) {
+      shiny::req(values$current_norm_plot)
+      .save_plot(values$current_norm_plot, file, input$img_format_norm)
+    }
+  )
+  output$download_pipeline_comparison <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (identical(input$img_format_pipeline, "pdf")) "pdf" else "png"
+      .dl_name("pipeline_comparison",
+        paste(input$norm_methods_1, collapse = "-"), "vs",
+        paste(input$norm_methods_2, collapse = "-"),
+        ext = ext
       )
-    })
-
-    # Plot history summary shown on report tab
-    output$plot_history_status <- shiny::renderText({
-      n <- length(values$plot_history)
-      if (n == 0) {
-        return("No plots generated yet.")
-      }
-      entries <- vapply(values$plot_history, function(e) {
-        paste0("[", e$section, "] ", e$label)
-      }, character(1))
-      paste(c(paste(n, "plot(s) will be included:"), entries), collapse = "\n")
-    })
-
-    # ==========================================================================
-    # Download handlers
-    # ==========================================================================
-
-    # Descriptive filenames for all downloads
-
-    output$download_raw_plot <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (identical(input$img_format_raw, "pdf")) "pdf" else "png"
-        .dl_name("raw", input$view_mode, input$plot_type, ext = ext)
-      },
-      content = function(file) {
-        shiny::req(values$current_raw_plot)
-        .save_plot(values$current_raw_plot, file, input$img_format_raw)
-      }
-    )
-
-    output$download_norm_plot <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (identical(input$img_format_norm, "pdf")) "pdf" else "png"
-        .dl_name("normalized", input$norm_plot_type,
-          if (!is.null(input$ellipse_type)) input$ellipse_type else "",
-          ext = ext
-        )
-      },
-      content = function(file) {
-        shiny::req(values$current_norm_plot)
-        .save_plot(values$current_norm_plot, file, input$img_format_norm)
-      }
-    )
-
-    output$download_pipeline_comparison <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (identical(input$img_format_pipeline, "pdf")) "pdf" else "png"
-        .dl_name("pipeline_comparison",
-          paste(input$norm_methods_1, collapse = "-"), "vs",
-          paste(input$norm_methods_2, collapse = "-"),
-          ext = ext
-        )
-      },
-      content = function(file) {
-        shiny::req(values$raw_data)
-        tryCatch(
-          {
-            dl_view <- if (is.null(input$norm_compare_view_mode)) {
-              "sample"
+    },
+    content = function(file) {
+      shiny::req(values$raw_data)
+      tryCatch(
+        {
+          dl_view <- if (is.null(input$norm_compare_view_mode)) {
+            "sample"
+          } else {
+            input$norm_compare_view_mode
+          }
+          dl_top_n <- if (isTRUE(input$norm_compare_limit_top)) {
+            input$norm_compare_top_n
+          } else {
+            NULL
+          }
+          p1 <- create_pipeline_plot(
+            apply_normalizations(values$raw_data$numeric_data, input$norm_methods_1),
+            paste("Pipeline 1:", paste(input$norm_methods_1, collapse = "->")),
+            metadata = if (input$norm_color_by_group) values$raw_data$metadata else NULL,
+            plot_type = input$norm_compare_plot_type,
+            view_mode = dl_view, top_n = dl_top_n
+          )
+          p2 <- create_pipeline_plot(
+            apply_normalizations(values$raw_data$numeric_data, input$norm_methods_2),
+            paste("Pipeline 2:", paste(input$norm_methods_2, collapse = "->")),
+            metadata = if (input$norm_color_by_group) values$raw_data$metadata else NULL,
+            plot_type = input$norm_compare_plot_type,
+            view_mode = dl_view, top_n = dl_top_n
+          )
+          combined <- gridExtra::arrangeGrob(p1, p2, ncol = 1)
+          ggplot2::ggsave(file, combined,
+            width = 12, height = 10, units = "in",
+            device = if (identical(input$img_format_pipeline, "pdf")) {
+              "pdf"
             } else {
-              input$norm_compare_view_mode
-            }
-            dl_top_n <- if (isTRUE(input$norm_compare_limit_top)) {
-              input$norm_compare_top_n
+              "png"
+            },
+            dpi = 300
+          )
+        },
+        error = function(e) show_error(e, "Pipeline comparison download")
+      )
+    }
+  )
+  output$download_viz <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (identical(input$img_format_results, "pdf")) "pdf" else "png"
+      .dl_name("results", input$viz_type,
+        gsub("[^A-Za-z0-9]", "_", input$contrast_select),
+        ext = ext
+      )
+    },
+    content = function(file) {
+      shiny::req(values$current_results_plot)
+      tryCatch(
+        {
+          is_pdf <- identical(input$img_format_results, "pdf")
+          if (inherits(values$current_results_plot, "pheatmap")) {
+            if (is_pdf) {
+              grDevices::pdf(file,
+                width = 12, height = 10,
+                useDingbats = FALSE
+              )
             } else {
-              NULL
-            }
-            p1 <- create_pipeline_plot(
-              apply_normalizations(values$raw_data$numeric_data, input$norm_methods_1),
-              paste("Pipeline 1:", paste(input$norm_methods_1, collapse = "->")),
-              metadata = if (input$norm_color_by_group) values$raw_data$metadata else NULL,
-              plot_type = input$norm_compare_plot_type,
-              view_mode = dl_view, top_n = dl_top_n
-            )
-            p2 <- create_pipeline_plot(
-              apply_normalizations(values$raw_data$numeric_data, input$norm_methods_2),
-              paste("Pipeline 2:", paste(input$norm_methods_2, collapse = "->")),
-              metadata = if (input$norm_color_by_group) values$raw_data$metadata else NULL,
-              plot_type = input$norm_compare_plot_type,
-              view_mode = dl_view, top_n = dl_top_n
-            )
-            combined <- gridExtra::arrangeGrob(p1, p2, ncol = 1)
-            ggplot2::ggsave(file, combined,
-              width = 12, height = 10, units = "in",
-              device = if (identical(input$img_format_pipeline, "pdf")) {
-                "pdf"
-              } else {
-                "png"
-              },
-              dpi = 300
-            )
-          },
-          error = function(e) show_error(e, "Pipeline comparison download")
-        )
-      }
-    )
-
-    output$download_viz <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (identical(input$img_format_results, "pdf")) "pdf" else "png"
-        .dl_name("results", input$viz_type,
-          gsub("[^A-Za-z0-9]", "_", input$contrast_select),
-          ext = ext
-        )
-      },
-      content = function(file) {
-        shiny::req(values$current_results_plot)
-        tryCatch(
-          {
-            is_pdf <- identical(input$img_format_results, "pdf")
-            if (inherits(values$current_results_plot, "pheatmap")) {
-              if (is_pdf) {
-                grDevices::pdf(file,
-                  width = 12, height = 10,
-                  useDingbats = FALSE
-                )
-              } else {
-                grDevices::png(file,
-                  width = 12, height = 10,
-                  units = "in", res = 300
-                )
-              }
-              grid::grid.draw(values$current_results_plot$gtable)
-              grDevices::dev.off()
-            } else {
-              ggplot2::ggsave(file, values$current_results_plot,
-                width = 12, height = 10, units = "in",
-                device = if (is_pdf) "pdf" else "png", dpi = 300
+              grDevices::png(file,
+                width = 12, height = 10,
+                units = "in", res = 300
               )
             }
-          },
-          error = function(e) show_error(e, "Results download")
-        )
+            grid::grid.draw(values$current_results_plot$gtable)
+            grDevices::dev.off()
+          } else {
+            ggplot2::ggsave(file, values$current_results_plot,
+              width = 12, height = 10, units = "in",
+              device = if (is_pdf) "pdf" else "png", dpi = 300
+            )
+          }
+        },
+        error = function(e) show_error(e, "Results download")
+      )
+    }
+  )
+  output$download_enrichment_viz <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (identical(input$img_format_enrich, "pdf")) "pdf" else "png"
+      .dl_name("enrichment_plot",
+        input$enrichment_plot_type,
+        gsub("[^A-Za-z0-9]", "_", input$enrichment_viz_contrast),
+        input$enrichment_viz_type,
+        ext = ext
+      )
+    },
+    content = function(file) {
+      shiny::req(values$current_enrichment_plot)
+      .save_plot(values$current_enrichment_plot, file, input$img_format_enrich)
+    }
+  )
+  output$download_expression_plots <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (identical(input$img_format_expression, "pdf")) "pdf" else "png"
+      lipid_tag <- if (!is.null(input$selected_lipids) &&
+        length(input$selected_lipids) > 0) {
+        paste(make.names(input$selected_lipids[seq_len(min(
+          3,
+          length(input$selected_lipids)
+        ))]), collapse = "-")
+      } else {
+        "no_lipid"
       }
-    )
+      .dl_name("expression", lipid_tag, ext = ext)
+    },
+    content = function(file) {
+      shiny::req(values$current_expression_plots)
+      tryCatch(
+        {
+          is_pdf <- identical(input$img_format_expression, "pdf")
+          if (is.list(values$current_expression_plots) &&
+            !inherits(values$current_expression_plots, "ggplot")) {
+            combined <- gridExtra::arrangeGrob(
+              grobs = values$current_expression_plots, ncol = 1
+            )
+            ggplot2::ggsave(file, combined,
+              width = 12,
+              height = 6 * length(values$current_expression_plots),
+              units = "in",
+              device = if (is_pdf) "pdf" else "png", dpi = 300
+            )
+          } else {
+            .save_plot(
+              values$current_expression_plots, file,
+              input$img_format_expression
+            )
+          }
+        },
+        error = function(e) show_error(e, "Expression plot download")
+      )
+    }
+  )
+}
 
-    output$download_current_table <- shiny::downloadHandler(
-      filename = function() {
-        .dl_name("diff", gsub("[^A-Za-z0-9]", "_", input$contrast_display),
-          ext = "csv"
-        )
-      },
-      content = function(file) {
-        shiny::req(values$diff_results, input$contrast_display)
-        tryCatch(
-          {
-            res <- values$diff_results$results[[input$contrast_display]]
+#' @noRd
+.setup_data_download_handlers <- function(input, output, session, values, show_error, add_to_history) {
+  output$download_current_table <- shiny::downloadHandler(
+    filename = function() {
+      .dl_name("diff", gsub("[^A-Za-z0-9]", "_", input$contrast_display),
+        ext = "csv"
+      )
+    },
+    content = function(file) {
+      shiny::req(values$diff_results, input$contrast_display)
+      tryCatch(
+        {
+          res <- values$diff_results$results[[input$contrast_display]]
+          if (!"Lipid" %in% colnames(res)) {
+            res <- data.frame(Lipid = rownames(res), res, stringsAsFactors = FALSE)
+          }
+          utils::write.csv(res, file, row.names = FALSE)
+        },
+        error = function(e) show_error(e, "Table download")
+      )
+    }
+  )
+  output$download_results <- shiny::downloadHandler(
+    filename = function() .dl_name("differential_all", ext = "xlsx"),
+    content = function(file) {
+      shiny::req(values$diff_results)
+      tryCatch(
+        {
+          wb <- openxlsx::createWorkbook()
+          for (nm in names(values$diff_results$results)) {
+            sheet_nm <- .truncate_sheet_name(nm) # Excel sheet names are capped at 31 chars
+            openxlsx::addWorksheet(wb, sheet_nm)
+            res <- values$diff_results$results[[nm]]
             if (!"Lipid" %in% colnames(res)) {
               res <- data.frame(Lipid = rownames(res), res, stringsAsFactors = FALSE)
             }
-            utils::write.csv(res, file, row.names = FALSE)
-          },
-          error = function(e) show_error(e, "Table download")
-        )
-      }
-    )
+            openxlsx::writeData(wb, sheet_nm, res, rowNames = FALSE)
+          }
+          openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
+        },
+        error = function(e) show_error(e, "Excel download")
+      )
+    }
+  )
+  output$download_enrichment <- shiny::downloadHandler(
+    filename = function() {
+      .dl_name("enrichment",
+        gsub("[^A-Za-z0-9]", "_", input$enrichment_contrast),
+        input$enrichment_type,
+        ext = "csv"
+      )
+    },
+    content = function(file) {
+      shiny::req(
+        values$enrichment_results,
+        input$enrichment_contrast, input$enrichment_type
+      )
+      tryCatch(
+        {
+          ed <- values$enrichment_results[[input$enrichment_contrast]][[
+            input$enrichment_type
+          ]]
+          utils::write.csv(ed, file, row.names = FALSE)
+        },
+        error = function(e) show_error(e, "Enrichment download")
+      )
+    }
+  )
+  output$download_report <- shiny::downloadHandler(
+    filename = function() {
+      ext <- if (input$report_format == "pdf") "pdf" else "html"
+      paste0("lipidomics_report_", Sys.Date(), ".", ext)
+    },
+    content = function(file) {
+      prog <- shiny::showNotification(
+        "Generating report... please wait.",
+        duration = NULL, type = "message"
+      )
+      on.exit(try(shiny::removeNotification(prog), silent = TRUE))
 
-    # Excel export: truncate sheet names to Excel's 31-char limit
-    output$download_results <- shiny::downloadHandler(
-      filename = function() .dl_name("differential_all", ext = "xlsx"),
-      content = function(file) {
-        shiny::req(values$diff_results)
-        tryCatch(
-          {
-            wb <- openxlsx::createWorkbook()
-            for (nm in names(values$diff_results$results)) {
-              sheet_nm <- .truncate_sheet_name(nm) # Excel sheet names are capped at 31 chars
-              openxlsx::addWorksheet(wb, sheet_nm)
-              res <- values$diff_results$results[[nm]]
-              if (!"Lipid" %in% colnames(res)) {
-                res <- data.frame(Lipid = rownames(res), res, stringsAsFactors = FALSE)
-              }
-              openxlsx::writeData(wb, sheet_nm, res, rowNames = FALSE)
-            }
-            openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
-          },
-          error = function(e) show_error(e, "Excel download")
-        )
-      }
-    )
+      tryCatch(
+        {
+          report_dir <- file.path(
+            tempdir(),
+            paste0("rpt_", format(Sys.time(), "%Y%m%d%H%M%S"))
+          )
+          dir.create(report_dir, recursive = TRUE, showWarnings = FALSE)
+          temp_rmd <- file.path(report_dir, "report.Rmd")
 
-    output$download_enrichment <- shiny::downloadHandler(
-      filename = function() {
-        .dl_name("enrichment",
-          gsub("[^A-Za-z0-9]", "_", input$enrichment_contrast),
-          input$enrichment_type,
-          ext = "csv"
-        )
-      },
-      content = function(file) {
-        shiny::req(
-          values$enrichment_results,
-          input$enrichment_contrast, input$enrichment_type
-        )
-        tryCatch(
-          {
-            ed <- values$enrichment_results[[input$enrichment_contrast]][[
-              input$enrichment_type
-            ]]
-            utils::write.csv(ed, file, row.names = FALSE)
-          },
-          error = function(e) show_error(e, "Enrichment download")
-        )
-      }
-    )
-
-    output$download_enrichment_viz <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (identical(input$img_format_enrich, "pdf")) "pdf" else "png"
-        .dl_name("enrichment_plot",
-          input$enrichment_plot_type,
-          gsub("[^A-Za-z0-9]", "_", input$enrichment_viz_contrast),
-          input$enrichment_viz_type,
-          ext = ext
-        )
-      },
-      content = function(file) {
-        shiny::req(values$current_enrichment_plot)
-        .save_plot(values$current_enrichment_plot, file, input$img_format_enrich)
-      }
-    )
-
-    output$download_expression_plots <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (identical(input$img_format_expression, "pdf")) "pdf" else "png"
-        lipid_tag <- if (!is.null(input$selected_lipids) &&
-          length(input$selected_lipids) > 0) {
-          paste(make.names(input$selected_lipids[seq_len(min(
-            3,
-            length(input$selected_lipids)
-          ))]), collapse = "-")
-        } else {
-          "no_lipid"
-        }
-        .dl_name("expression", lipid_tag, ext = ext)
-      },
-      content = function(file) {
-        shiny::req(values$current_expression_plots)
-        tryCatch(
-          {
-            is_pdf <- identical(input$img_format_expression, "pdf")
-            if (is.list(values$current_expression_plots) &&
-              !inherits(values$current_expression_plots, "ggplot")) {
-              combined <- gridExtra::arrangeGrob(
-                grobs = values$current_expression_plots, ncol = 1
-              )
-              ggplot2::ggsave(file, combined,
-                width = 12,
-                height = 6 * length(values$current_expression_plots),
-                units = "in",
-                device = if (is_pdf) "pdf" else "png", dpi = 300
-              )
-            } else {
-              .save_plot(
-                values$current_expression_plots, file,
-                input$img_format_expression
-              )
-            }
-          },
-          error = function(e) show_error(e, "Expression plot download")
-        )
-      }
-    )
-
-    # ---- Report generation -----------------------------------------------
-    output$download_report <- shiny::downloadHandler(
-      filename = function() {
-        ext <- if (input$report_format == "pdf") "pdf" else "html"
-        paste0("lipidomics_report_", Sys.Date(), ".", ext)
-      },
-      content = function(file) {
-        prog <- shiny::showNotification(
-          "Generating report... please wait.",
-          duration = NULL, type = "message"
-        )
-        on.exit(try(shiny::removeNotification(prog), silent = TRUE))
-
-        tryCatch(
-          {
-            report_dir <- file.path(
-              tempdir(),
-              paste0("rpt_", format(Sys.time(), "%Y%m%d%H%M%S"))
-            )
-            dir.create(report_dir, recursive = TRUE, showWarnings = FALSE)
-            temp_rmd <- file.path(report_dir, "report.Rmd")
-
-            # --- Save current plots as named files (primary route) ---
-            # This works even if the user never clicked the explicit buttons;
-            # any plot that was ever created and stored is included.
-            .save_rpt_plot <- function(plot_obj, filename) {
-              fp <- file.path(report_dir, filename)
-              tryCatch(
-                {
-                  if (inherits(plot_obj, "pheatmap")) {
-                    grDevices::png(fp, width = 10, height = 8, units = "in", res = 150)
-                    grid::grid.draw(plot_obj$gtable)
-                    grDevices::dev.off()
-                  } else if (inherits(plot_obj, "ggplot")) {
-                    ggplot2::ggsave(fp, plot_obj,
-                      width = 10, height = 6,
-                      dpi = 150, units = "in"
-                    )
-                  } else {
-                    return(NULL)
-                  }
-                  filename # return filename on success
-                },
-                error = function(e) {
-                  if (grDevices::dev.cur() > 1) try(grDevices::dev.off(), silent = TRUE)
-                  NULL
-                }
-              )
-            }
-
-            # Build simple named list of plot file paths
-            pf <- list()
-            if (!is.null(values$current_raw_plot)) {
-              pf$raw_plot <- .save_rpt_plot(values$current_raw_plot, "raw_data.png")
-            }
-            if (!is.null(values$current_pipeline_plots)) {
-              combined <- gridExtra::arrangeGrob(
-                values$current_pipeline_plots$p1,
-                values$current_pipeline_plots$p2,
-                ncol = 1
-              )
-              fp <- file.path(report_dir, "pipeline_comparison.png")
-              tryCatch(
-                ggplot2::ggsave(fp, combined,
-                  width = 10, height = 10,
-                  dpi = 150, units = "in"
-                ),
-                error = function(e) NULL
-              )
-              pf$pipeline_plot <- "pipeline_comparison.png"
-            }
-            if (!is.null(values$current_norm_plot)) {
-              pf$norm_plot <- .save_rpt_plot(values$current_norm_plot, "normalized.png")
-            }
-            if (!is.null(values$current_results_plot)) {
-              pf$results_plot <- .save_rpt_plot(values$current_results_plot, "results.png")
-            }
-            if (!is.null(values$current_enrichment_plot)) {
-              pf$enrichment_plot <- .save_rpt_plot(values$current_enrichment_plot, "enrichment.png")
-            }
-
-            # Extra plots from session history (appended as appendix)
-            extra_plots <- list()
-            for (entry in values$plot_history) {
-              fn <- paste0(make.names(paste0(entry$section, "_", entry$label)), ".png")
-              saved <- .save_rpt_plot(entry$plot, fn)
-              if (!is.null(saved)) {
-                extra_plots[[length(extra_plots) + 1]] <- list(
-                  file = fn, label = entry$label, section = entry$section
-                )
-              }
-            }
-
-            rmd <- .build_report_rmd_with_plots(
-              title              = input$report_title,
-              author             = input$report_author,
-              sections           = input$report_sections,
-              raw_data           = values$raw_data,
-              normalized_data    = values$normalized_data,
-              diff_results       = values$diff_results,
-              enrichment_results = values$enrichment_results,
-              output_format      = input$report_format,
-              plot_files         = pf,
-              extra_plots        = extra_plots
-            )
-
-            # Open, write, and explicitly close the connection: writeLines()
-            # does not close connections passed in already-open, and without
-            # an explicit close() the write buffer may not be flushed to disk
-            # before rmarkdown::render() reads the file below, truncating it
-            # mid-content.
-            rmd_con <- file(temp_rmd, "w", encoding = "UTF-8")
-            writeLines(rmd, con = rmd_con)
-            close(rmd_con)
-
-            fmt <- if (input$report_format == "pdf") {
-              rmarkdown::pdf_document(toc = TRUE)
-            } else {
-              rmarkdown::html_document(toc = TRUE, toc_float = TRUE, theme = "flatly")
-            }
-
-            out_file <- tryCatch(
+          # --- Save current plots as named files (primary route) ---
+          # This works even if the user never clicked the explicit buttons;
+          # any plot that was ever created and stored is included.
+          .save_rpt_plot <- function(plot_obj, filename) {
+            fp <- file.path(report_dir, filename)
+            tryCatch(
               {
-                rmarkdown::render(temp_rmd,
-                  output_format = fmt,
-                  output_dir = report_dir, quiet = TRUE
-                )
-              },
-              error = function(pdf_err) {
-                if (input$report_format == "pdf") {
-                  shiny::showNotification(
-                    "PDF failed - generating HTML instead. Install tinytex for PDF support.",
-                    type = "warning", duration = 10
-                  )
-                  rmarkdown::render(temp_rmd,
-                    output_format = rmarkdown::html_document(
-                      toc = TRUE, toc_float = TRUE, theme = "flatly"
-                    ),
-                    output_dir = report_dir, quiet = TRUE
+                if (inherits(plot_obj, "pheatmap")) {
+                  grDevices::png(fp, width = 10, height = 8, units = "in", res = 150)
+                  grid::grid.draw(plot_obj$gtable)
+                  grDevices::dev.off()
+                } else if (inherits(plot_obj, "ggplot")) {
+                  ggplot2::ggsave(fp, plot_obj,
+                    width = 10, height = 6,
+                    dpi = 150, units = "in"
                   )
                 } else {
-                  stop(pdf_err)
+                  return(NULL)
                 }
+                filename # return filename on success
+              },
+              error = function(e) {
+                if (grDevices::dev.cur() > 1) try(grDevices::dev.off(), silent = TRUE)
+                NULL
               }
             )
-
-            file.copy(out_file, file, overwrite = TRUE)
-            shiny::showNotification("Report generated successfully!", type = "message")
-          },
-          error = function(e) {
-            shiny::showNotification(paste("Report failed:", e$message),
-              type = "error", duration = 15
-            )
-            writeLines(paste("# Report Error\n\n", e$message), file)
           }
-        )
-      }
-    )
-  } # end server
 
-  shiny::shinyApp(
-    ui = ui, server = server,
-    options = list(port = port)
+          # Build simple named list of plot file paths
+          pf <- list()
+          if (!is.null(values$current_raw_plot)) {
+            pf$raw_plot <- .save_rpt_plot(values$current_raw_plot, "raw_data.png")
+          }
+          if (!is.null(values$current_pipeline_plots)) {
+            combined <- gridExtra::arrangeGrob(
+              values$current_pipeline_plots$p1,
+              values$current_pipeline_plots$p2,
+              ncol = 1
+            )
+            fp <- file.path(report_dir, "pipeline_comparison.png")
+            tryCatch(
+              ggplot2::ggsave(fp, combined,
+                width = 10, height = 10,
+                dpi = 150, units = "in"
+              ),
+              error = function(e) NULL
+            )
+            pf$pipeline_plot <- "pipeline_comparison.png"
+          }
+          if (!is.null(values$current_norm_plot)) {
+            pf$norm_plot <- .save_rpt_plot(values$current_norm_plot, "normalized.png")
+          }
+          if (!is.null(values$current_results_plot)) {
+            pf$results_plot <- .save_rpt_plot(values$current_results_plot, "results.png")
+          }
+          if (!is.null(values$current_enrichment_plot)) {
+            pf$enrichment_plot <- .save_rpt_plot(values$current_enrichment_plot, "enrichment.png")
+          }
+
+          # Extra plots from session history (appended as appendix)
+          extra_plots <- list()
+          for (entry in values$plot_history) {
+            fn <- paste0(make.names(paste0(entry$section, "_", entry$label)), ".png")
+            saved <- .save_rpt_plot(entry$plot, fn)
+            if (!is.null(saved)) {
+              extra_plots[[length(extra_plots) + 1]] <- list(
+                file = fn, label = entry$label, section = entry$section
+              )
+            }
+          }
+
+          rmd <- .build_report_rmd_with_plots(
+            title              = input$report_title,
+            author             = input$report_author,
+            sections           = input$report_sections,
+            raw_data           = values$raw_data,
+            normalized_data    = values$normalized_data,
+            diff_results       = values$diff_results,
+            enrichment_results = values$enrichment_results,
+            output_format      = input$report_format,
+            plot_files         = pf,
+            extra_plots        = extra_plots
+          )
+
+          # Open, write, and explicitly close the connection: writeLines()
+          # does not close connections passed in already-open, and without
+          # an explicit close() the write buffer may not be flushed to disk
+          # before rmarkdown::render() reads the file below, truncating it
+          # mid-content.
+          rmd_con <- file(temp_rmd, "w", encoding = "UTF-8")
+          writeLines(rmd, con = rmd_con)
+          close(rmd_con)
+
+          fmt <- if (input$report_format == "pdf") {
+            rmarkdown::pdf_document(toc = TRUE)
+          } else {
+            rmarkdown::html_document(toc = TRUE, toc_float = TRUE, theme = "flatly")
+          }
+
+          out_file <- tryCatch(
+            {
+              rmarkdown::render(temp_rmd,
+                output_format = fmt,
+                output_dir = report_dir, quiet = TRUE
+              )
+            },
+            error = function(pdf_err) {
+              if (input$report_format == "pdf") {
+                shiny::showNotification(
+                  "PDF failed - generating HTML instead. Install tinytex for PDF support.",
+                  type = "warning", duration = 10
+                )
+                rmarkdown::render(temp_rmd,
+                  output_format = rmarkdown::html_document(
+                    toc = TRUE, toc_float = TRUE, theme = "flatly"
+                  ),
+                  output_dir = report_dir, quiet = TRUE
+                )
+              } else {
+                stop(pdf_err)
+              }
+            }
+          )
+
+          file.copy(out_file, file, overwrite = TRUE)
+          shiny::showNotification("Report generated successfully!", type = "message")
+        },
+        error = function(e) {
+          shiny::showNotification(paste("Report failed:", e$message),
+            type = "error", duration = 15
+          )
+          writeLines(paste("# Report Error\n\n", e$message), file)
+        }
+      )
+    }
   )
 }
 
@@ -3400,11 +3446,11 @@ Methods are applied left-to-right in the order you select them.
 #' @return A single character string containing the complete Rmd document.
 #' @noRd
 .build_report_rmd_with_plots <- function(title, author, sections,
-                                        raw_data, normalized_data,
-                                        diff_results, enrichment_results,
-                                        output_format = "html",
-                                        plot_files = list(),
-                                        extra_plots = list()) {
+                                         raw_data, normalized_data,
+                                         diff_results, enrichment_results,
+                                         output_format = "html",
+                                         plot_files = list(),
+                                         extra_plots = list()) {
   # Escapes backslash/double-quote so a value can be safely embedded inside
   # a double-quoted string in either YAML front matter or R source code --
   # both use identical backslash escaping rules for this purpose.
@@ -3476,7 +3522,7 @@ Methods are applied left-to-right in the order you select them.
         var_name, ' <- "', quote_escape(caption_safe), '"\n',
         "```\n",
         '\n```{r echo=FALSE, out.width="', width,
-        '", fig.cap=', var_name, '}\n',
+        '", fig.cap=', var_name, "}\n",
         'knitr::include_graphics("', path, '")\n',
         "```\n\n"
       )
@@ -3532,9 +3578,22 @@ Methods are applied left-to-right in the order you select them.
     content <- paste0(content, "\n---\n\n# Normalisation\n\n")
 
     if (!is.null(normalized_data)) {
+      # Report the methods that actually completed (recorded when the pipeline
+      # was applied), never the ones merely selected in the UI.
+      applied <- normalized_data$methods
+      method_line <- if (!is.null(applied) && length(applied) > 0) {
+        paste0(
+          "- **Methods applied:** ",
+          .escape_report_text(paste(applied, collapse = " -> "), output_format),
+          "\n\n"
+        )
+      } else {
+        ""
+      }
       content <- paste0(
         content,
         "Normalisation has been applied to the dataset.\n\n",
+        method_line,
         embed_plot(plot_files$pipeline_plot, "Pipeline Comparison"),
         embed_plot(plot_files$norm_plot, "Normalised Data Distribution")
       )

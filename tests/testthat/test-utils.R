@@ -8,9 +8,10 @@
 make_matrix <- function(n_samples = 6, n_lipids = 20, seed = 42) {
   set.seed(seed)
   m <- matrix(stats::rlnorm(n_samples * n_lipids, meanlog = 8, sdlog = 1),
-              nrow = n_samples, ncol = n_lipids)
+    nrow = n_samples, ncol = n_lipids
+  )
   rownames(m) <- paste0("Sample_", seq_len(n_samples))
-  colnames(m) <- paste0("Lipid_",  seq_len(n_lipids))
+  colnames(m) <- paste0("Lipid_", seq_len(n_lipids))
   m
 }
 
@@ -23,7 +24,8 @@ testthat::test_that("load_lipidomics_data reads a CSV and separates metadata/num
       "Sample Name" = c("S1", "S2"), "Sample Group" = c("A", "B"),
       "PC 16:0" = c(1000, 2000), check.names = FALSE
     ),
-    tmp, row.names = FALSE
+    tmp,
+    row.names = FALSE
   )
   res <- load_lipidomics_data(tmp)
   testthat::expect_equal(dim(res$numeric_data), c(2L, 1L))
@@ -47,7 +49,8 @@ testthat::test_that("load_lipidomics_data removes PBQC rows", {
       "Sample Group" = c("A", "B", "PBQC"),
       "PC 16:0" = c(1000, 2000, 3000), check.names = FALSE
     ),
-    tmp, row.names = FALSE
+    tmp,
+    row.names = FALSE
   )
   res <- load_lipidomics_data(tmp)
   testthat::expect_equal(nrow(res$metadata), 2L)
@@ -79,7 +82,8 @@ testthat::test_that("load_custom_classification / export_classification round-tr
   on.exit(unlink(tmp))
   write.csv(
     data.frame(Lipid = c("PC 16:0_18:1", "PE 18:0"), Class = c("A", "B")),
-    tmp, row.names = FALSE
+    tmp,
+    row.names = FALSE
   )
   cls <- load_custom_classification(tmp)
   testthat::expect_equal(colnames(cls)[1], "Lipid")
@@ -113,7 +117,8 @@ testthat::test_that("load_custom_enrichment_sets parses Lipid/Set_Name pairs", {
       Lipid = c("PC 16:0_18:1", "PE 18:0"),
       Set_Name = c("SetA", "SetA")
     ),
-    tmp, row.names = FALSE
+    tmp,
+    row.names = FALSE
   )
   sets <- load_custom_enrichment_sets(tmp)
   testthat::expect_named(sets, "SetA")
@@ -166,7 +171,7 @@ testthat::test_that("impute_missing_values knn seed does not leak into global RN
 
 # 6. batch effect correction -------------------------------------------------
 testthat::test_that("correct_batch_effects (limma) preserves dimensions and reports method_used", {
-  d  <- load_lipidomics_data_from_df(generate_example_data())
+  d <- load_lipidomics_data_from_df(generate_example_data())
   md <- d$metadata
   md$Batch <- rep(c("B1", "B2"), times = 10)
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
@@ -180,7 +185,7 @@ testthat::test_that("correct_batch_effects (limma) preserves dimensions and repo
 
 testthat::test_that("correct_batch_effects falls back from combat to limma when sva is unavailable", {
   testthat::skip_if(requireNamespace("sva", quietly = TRUE), "sva is installed; fallback path not triggered")
-  d  <- load_lipidomics_data_from_df(generate_example_data())
+  d <- load_lipidomics_data_from_df(generate_example_data())
   md <- d$metadata
   md$Batch <- rep(c("B1", "B2"), times = 10)
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
@@ -192,7 +197,7 @@ testthat::test_that("correct_batch_effects falls back from combat to limma when 
 })
 
 testthat::test_that("correct_batch_effects errors on missing batch_column", {
-  d  <- load_lipidomics_data_from_df(generate_example_data())
+  d <- load_lipidomics_data_from_df(generate_example_data())
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(
     correct_batch_effects(norm, d$metadata, batch_column = "Nope"),
@@ -201,7 +206,7 @@ testthat::test_that("correct_batch_effects errors on missing batch_column", {
 })
 
 testthat::test_that("correct_batch_effects rejects non-data.frame metadata", {
-  d  <- load_lipidomics_data_from_df(generate_example_data())
+  d <- load_lipidomics_data_from_df(generate_example_data())
   norm <- apply_normalizations(d$numeric_data, c("TIC", "Log2"))
   testthat::expect_error(
     correct_batch_effects(norm, list(a = 1), batch_column = "Batch"),
@@ -218,15 +223,17 @@ testthat::test_that("apply_normalizations rejects invalid data or methods", {
 
 testthat::test_that("individual normalize_* functions reject non-numeric input", {
   bad <- data.frame(a = c("x", "y"), b = c("z", "w"))
-  for (fn in list(normalize_tic, normalize_pqn, normalize_quantile,
-                  normalize_log2median, normalize_median, normalize_mean)) {
+  for (fn in list(
+    normalize_tic, normalize_pqn, normalize_quantile,
+    normalize_log2median, normalize_median, normalize_mean
+  )) {
     testthat::expect_error(fn(bad), "numeric")
   }
   testthat::expect_error(normalize_tic(list(a = 1)), "matrix or data.frame")
 })
 
 testthat::test_that(".validate_numeric_matrix accepts numeric matrices and data frames", {
-  m  <- make_matrix()
+  m <- make_matrix()
   df <- as.data.frame(m)
   testthat::expect_true(LIPIDIFy:::.validate_numeric_matrix(m))
   testthat::expect_true(LIPIDIFy:::.validate_numeric_matrix(df))

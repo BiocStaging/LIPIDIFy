@@ -339,8 +339,10 @@ perform_enrichment_analysis <- function(results_list, classification_data,
                                         min_set_size = 5, max_set_size = 500,
                                         custom_sets = NULL) {
   if (!is.list(results_list) || is.data.frame(results_list) || is.null(names(results_list))) {
-    stop("`results_list` must be a named list of differential analysis result ",
-      "data frames (e.g. the `$results` element of `perform_differential_analysis()`).")
+    stop(
+      "`results_list` must be a named list of differential analysis result ",
+      "data frames (e.g. the `$results` element of `perform_differential_analysis()`)."
+    )
   }
   if (!is.data.frame(classification_data)) {
     stop("`classification_data` must be a data.frame, not ", class(classification_data)[1], ".")
@@ -456,7 +458,7 @@ perform_enrichment_analysis <- function(results_list, classification_data,
           call. = FALSE
         )
       } else {
-        warning("FGSEA error: ", conditionMessage(e), call. = FALSE)
+        warning("FGSEA failed: ", conditionMessage(e), call. = FALSE)
       }
       return(NULL)
     }

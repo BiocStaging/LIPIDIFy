@@ -127,7 +127,9 @@ Data Upload → Classification → Raw Visualization → Normalization →
 #### Normalization Methods
 - TIC (Total Ion Current)
 - PQN (Probabilistic Quotient Normalization)
-- Quantile, VSN, Median, Mean
+- Quantile, Median, Mean
+- Log2Median (log2 + median centering) and VSN (true variance-stabilising
+  normalization via the Bioconductor `vsn` package) - two separate methods
 - Log transformations (Log2, Log10)
 - Pipeline comparison tools
 

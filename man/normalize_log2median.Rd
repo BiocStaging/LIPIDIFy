@@ -18,11 +18,18 @@ relative to the global median. This is a simplified variance-stabilising
 step suitable for mass-spectrometry lipidomics data.
 }
 \details{
-This method is \strong{not} equivalent to the full VSN procedure of
-Huber et al. (2002), which uses maximum-likelihood estimation. If true
-VSN is required, use the \pkg{vsn} Bioconductor package directly.
+This method is \strong{not} equivalent to the VSN procedure of
+Huber et al. (2002), which estimates its transformation by maximum
+likelihood. Log2 Median Centering applies a fixed \code{log2(x + 1)}
+transform and a per-sample median shift, and back-transforms to the
+original scale. For genuine variance-stabilising calibration use the
+separate \code{\link{normalize_vsn}} function (method name \code{"VSN"}),
+which calls \code{vsn::justvsn()}.
 }
 \examples{
 m <- matrix(c(1000, 2000, 3000, 4000, 500, 1500), nrow = 2)
 normalize_log2median(m)
+}
+\seealso{
+\code{\link{normalize_vsn}} for true VSN.
 }
