@@ -654,6 +654,13 @@ From here, `se` can be passed to any Bioconductor function expecting a
 
 ***
 
+# Funding
+
+This work was supported by a grant to A/Prof Karen Sheppard from the National
+Health and Medical Research Council of Australia (#2020050).
+
+***
+
 # Session Information
 
 ```{r session-info}

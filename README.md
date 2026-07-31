@@ -309,3 +309,10 @@ If you use **LIPIDIFy** in your research, please cite:
 
 - Bug reports and feature requests: GitHub **Issues**
 - Contributions welcome via pull requests
+
+---
+
+## Funding
+
+This work was supported by a grant to A/Prof Karen Sheppard from the National
+Health and Medical Research Council of Australia (#2020050).

@@ -164,3 +164,39 @@ testthat::test_that("create_default_contrasts drops NA levels", {
   ctrs <- create_default_contrasts(c("A", "B", NA))
   testthat::expect_equal(length(ctrs), 1L)
 })
+
+# 6. projections on raw (un-normalized, un-imputed) data ---------------------
+# The Raw Data Visualization tab offers PCA and PLS-DA. Raw data has not been
+# imputed at that point, so these tests pin the missing-value behaviour the
+# tab's guard rails depend on.
+testthat::test_that("perform_pca projects raw data and tolerates missing values", {
+  d <- make_test_data()
+  raw <- d$numeric_data
+
+  res <- perform_pca(raw, d$metadata, "Sample Group")
+  testthat::expect_equal(nrow(res$pca_data), nrow(raw))
+  testthat::expect_true(all(c("PC1", "PC2", "Group") %in% names(res$pca_data)))
+
+  raw[1, 1] <- NA
+  testthat::expect_warning(
+    perform_pca(raw, d$metadata, "Sample Group"),
+    "Missing values are imputed"
+  )
+  res_na <- suppressWarnings(perform_pca(raw, d$metadata, "Sample Group"))
+  testthat::expect_equal(nrow(res_na$pca_data), nrow(raw))
+})
+
+testthat::test_that("perform_plsda projects raw data but cannot handle missing values", {
+  d <- make_test_data()
+  raw <- as.matrix(d$numeric_data)
+
+  res <- perform_plsda(raw, d$metadata, "Sample Group")
+  testthat::expect_equal(nrow(res$scores_data), nrow(raw))
+
+  # Incomplete rows are dropped by pls::plsr, desynchronising scores from the
+  # metadata; perform_plsda degrades to an empty scores_data, which is what the
+  # app checks before attempting to draw a PLS-DA of raw data.
+  raw[1, 1] <- NA
+  res_na <- suppressWarnings(perform_plsda(raw, d$metadata, "Sample Group"))
+  testthat::expect_equal(nrow(res_na$scores_data), 0L)
+})

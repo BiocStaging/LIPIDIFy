@@ -824,20 +824,27 @@ Methods are applied left-to-right in the order you select them.
       shinydashboard::box(
         title = "Raw Data Visualization Options", status = "primary",
         solidHeader = TRUE, width = 4,
-        shiny::radioButtons("view_mode", "View Mode:",
-          choices = c(
-            "By Sample" = "sample",
-            "By Lipid" = "lipid"
-          ),
-          selected = "sample"
-        ),
         shiny::selectInput("plot_type", "Plot Type:",
           choices = c(
             "Boxplot"   = "boxplot",
             "Violin"    = "violin",
             "Density"   = "density",
             "Histogram" = "histogram",
-            "Heatmap"   = "heatmap"
+            "Heatmap"   = "heatmap",
+            "PCA"       = "pca",
+            "PLS-DA"    = "plsda"
+          )
+        ),
+        # View mode applies to the per-sample/per-lipid distribution plots only;
+        # PCA and PLS-DA are always sample-wise projections.
+        shiny::conditionalPanel(
+          condition = "input.plot_type != 'pca' && input.plot_type != 'plsda'",
+          shiny::radioButtons("view_mode", "View Mode:",
+            choices = c(
+              "By Sample" = "sample",
+              "By Lipid" = "lipid"
+            ),
+            selected = "sample"
           )
         ),
         shiny::conditionalPanel(
@@ -848,13 +855,19 @@ Methods are applied left-to-right in the order you select them.
           )
         ),
         shiny::conditionalPanel(
-          condition = "input.view_mode == 'lipid'",
+          condition = paste0(
+            "input.view_mode == 'lipid' && ",
+            "input.plot_type != 'pca' && input.plot_type != 'plsda'"
+          ),
           shiny::numericInput("top_n_lipids", "Top N Variable Lipids:",
             value = 30, min = 5, max = 200
           )
         ),
         shiny::conditionalPanel(
-          condition = "input.view_mode == 'sample'",
+          condition = paste0(
+            "input.view_mode == 'sample' && ",
+            "input.plot_type != 'pca' && input.plot_type != 'plsda'"
+          ),
           shiny::checkboxInput("limit_top_samples",
             "Limit to top N samples",
             value = FALSE
@@ -864,6 +877,32 @@ Methods are applied left-to-right in the order you select them.
             shiny::numericInput("top_n_samples", "Top N Variable Samples:",
               value = 30, min = 2, max = 1000
             )
+          )
+        ),
+        shiny::conditionalPanel(
+          condition = "input.plot_type == 'pca' || input.plot_type == 'plsda'",
+          shiny::selectInput("raw_group_column", "Group Column:", choices = NULL),
+          .checkbox_group_with_buttons(
+            "raw_groups_included", "Include Groups:",
+            choices = NULL, selected = NULL
+          ),
+          shiny::radioButtons("raw_ellipse_type", "Ellipse Type:",
+            choices = c(
+              "None" = "none",
+              "Confidence Ellipse" = "confidence",
+              "Visual Circle" = "visual"
+            ),
+            selected = "none"
+          ),
+          shiny::checkboxInput("raw_show_sample_labels",
+            "Show Sample Labels",
+            value = FALSE
+          ),
+          shiny::helpText(
+            "Projections of un-normalized intensities are intended for quality",
+            "control -- they are typically dominated by the most abundant",
+            "lipids and by technical variation. Compare against the same plot",
+            "in Normalized Data Visualization."
           )
         ),
         shiny::hr(),
@@ -1753,6 +1792,90 @@ Methods are applied left-to-right in the order you select them.
 }
 
 #' @noRd
+.raw_projection_plot <- function(input, output, values, raw_data_filtered,
+                                 add_to_history) {
+  group_col <- input$raw_group_column
+  shiny::req(group_col)
+
+  dat <- raw_data_filtered$numeric_data
+  md <- raw_data_filtered$metadata
+  if (!group_col %in% names(md)) {
+    shiny::showNotification(
+      paste0("Group column '", group_col, "' was not found in the metadata."),
+      type = "error", duration = 10
+    )
+    return(invisible(NULL))
+  }
+  if (length(input$raw_groups_included) > 0) {
+    mask <- md[[group_col]] %in% input$raw_groups_included
+    dat <- dat[mask, , drop = FALSE]
+    md <- md[mask, , drop = FALSE]
+  }
+  if (is.null(rownames(md))) rownames(md) <- rownames(dat)
+
+  # Raw data has not been imputed yet, so missing values are the norm rather
+  # than the exception. PCA can still be projected (FactoMineR substitutes the
+  # variable mean) but PLS-DA drops incomplete rows, which desynchronises the
+  # scores from the metadata; block it with an actionable message instead.
+  n_na <- sum(is.na(dat))
+  if (n_na > 0L && identical(input$plot_type, "plsda")) {
+    shiny::showNotification(
+      paste0(
+        "PLS-DA cannot be computed on raw data containing missing values (",
+        n_na, " found). Impute first in the Preprocessing tab, or use PCA."
+      ),
+      type = "error", duration = 15
+    )
+    return(invisible(NULL))
+  }
+
+  if (identical(input$plot_type, "pca")) {
+    if (n_na > 0L) {
+      shiny::showNotification(
+        paste0(
+          n_na, " missing value(s) were replaced by the mean of each lipid to ",
+          "compute this PCA. Impute in the Preprocessing tab for a result you ",
+          "control."
+        ),
+        type = "warning", duration = 15
+      )
+    }
+    res <- perform_pca(dat, md, group_col)
+    plot <- create_pca_plot_with_ellipses(
+      pca_data           = res$pca_data,
+      variance_explained = res$variance_explained,
+      ellipse_type       = input$raw_ellipse_type,
+      show_sample_labels = isTRUE(input$raw_show_sample_labels)
+    )
+    label <- "Raw PCA"
+  } else {
+    res <- perform_plsda(as.matrix(dat), md, group_col)
+    if (NROW(res$scores_data) == 0L) {
+      shiny::showNotification(
+        "PLS-DA could not be computed for the selected samples and groups.",
+        type = "error", duration = 10
+      )
+      return(invisible(NULL))
+    }
+    plot <- create_plsda_plot_with_ellipses(
+      plsda_data         = res$scores_data,
+      ellipse_type       = input$raw_ellipse_type,
+      show_sample_labels = isTRUE(input$raw_show_sample_labels)
+    )
+    label <- "Raw PLS-DA"
+  }
+
+  values$current_raw_plot <- plot
+  values$current_plot <- plot
+  add_to_history("Raw Data", label, plot)
+  output$raw_plot_ui <- shiny::renderUI(
+    plotly::plotlyOutput("raw_plot", height = "500px")
+  )
+  output$raw_plot <- plotly::renderPlotly(plotly::ggplotly(plot))
+  invisible(NULL)
+}
+
+#' @noRd
 .setup_raw_viz_handlers <- function(input, output, session, values, show_error, add_to_history) {
   shiny::observe({
     shiny::req(values$raw_data)
@@ -1790,6 +1913,32 @@ Methods are applied left-to-right in the order you select them.
       )
     }
   })
+  # Group controls for the raw PCA / PLS-DA projections. These are kept
+  # separate from the normalized tab's `group_column` / `groups_included` so
+  # that changing one tab's selection never silently rewrites the other's.
+  shiny::observe({
+    shiny::req(values$raw_data)
+    md <- values$raw_data$metadata
+    cand <- names(md)[vapply(md, function(x) {
+      length(unique(x[!is.na(x)])) > 1L && length(unique(x[!is.na(x)])) < nrow(md)
+    }, logical(1))]
+    if (length(cand) == 0L) cand <- names(md)
+    sel <- if ("Sample Group" %in% cand) "Sample Group" else cand[1]
+    shiny::updateSelectInput(session, "raw_group_column",
+      choices = cand, selected = sel
+    )
+  })
+  shiny::observe({
+    shiny::req(values$raw_data, input$raw_group_column)
+    md <- values$raw_data$metadata
+    if (input$raw_group_column %in% names(md)) {
+      grps <- unique(md[[input$raw_group_column]])
+      grps <- grps[!is.na(grps)]
+      shiny::updateCheckboxGroupInput(session, "raw_groups_included",
+        choices = grps, selected = grps
+      )
+    }
+  })
   shiny::observeEvent(input$create_raw_plot, {
     shiny::req(values$raw_data)
     tryCatch(
@@ -1806,7 +1955,12 @@ Methods are applied left-to-right in the order you select them.
         }
         metadata <- if (isTRUE(input$raw_color_by_group)) raw_data_filtered$metadata else NULL
 
-        if (input$plot_type == "heatmap") {
+        if (input$plot_type %in% c("pca", "plsda")) {
+          .raw_projection_plot(
+            input, output, values, raw_data_filtered,
+            add_to_history
+          )
+        } else if (input$plot_type == "heatmap") {
           hm <- create_heatmap_robust(
             data_matrix  = t(raw_data_filtered$numeric_data),
             metadata     = raw_data_filtered$metadata,

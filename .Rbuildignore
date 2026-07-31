@@ -5,3 +5,4 @@
 ^.*\.DS_Store$
 ^LICENSE\.md$
 ^\.claude$
+^.*\.BiocCheck$

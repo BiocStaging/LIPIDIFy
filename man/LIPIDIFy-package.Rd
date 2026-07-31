@@ -39,5 +39,10 @@ Authors:
   \item Fayrouz Hammal \email{fayrouz.hammal@petermac.org} (\href{https://orcid.org/0000-0002-7612-4953}{ORCID})
 }
 
+Other contributors:
+\itemize{
+  \item Karen Sheppard (NHMRC of Australia grant #2020050) [funder]
+}
+
 }
 \keyword{internal}

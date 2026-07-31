@@ -1,3 +1,28 @@
+# LIPIDIFy 0.99.4
+
+## New features
+- PCA and PLS-DA are now available in the **Raw Data Visualization** tab, with
+  the same Group Column, Include Groups, Ellipse Type and Show Sample Labels
+  controls offered for normalized data. Because raw data has not been imputed
+  at that stage, PCA reports how many missing values were replaced by the
+  lipid mean, and PLS-DA (which cannot align scores to metadata once
+  incomplete rows are dropped) is blocked with a message directing the user to
+  the Preprocessing tab.
+
+## Behaviour changes
+- `impute_missing_values()` no longer calls `set.seed()`. It gains an optional
+  `seed` argument, defaulting to `NULL`, and runs KNN imputation under
+  `withr::with_preserve_seed()` or `withr::with_seed()`, so the caller's random
+  number stream is restored either way. Imputed values are unchanged:
+  `impute::impute.knn()` seeds its own generator via `rng.seed`, so the
+  previous `set.seed(42)` never influenced the result.
+- `withr` added to `Imports`.
+
+## Documentation
+- A. Prof Karen Sheppard is credited in `Authors@R` with the `fnd` (funder)
+  role, and the supporting NHMRC of Australia grant (#2020050) is acknowledged
+  in the README and the vignette.
+
 # LIPIDIFy 0.99.3
 
 ## New features

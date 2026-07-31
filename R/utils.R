@@ -1145,8 +1145,15 @@ get_imputation_descriptions <- function() {
 #'   \code{"knn"}. See \code{\link{get_imputation_descriptions}} for details.
 #' @param k Integer. Number of nearest neighbours for \code{"knn"}
 #'   (ignored for other methods). Default \code{5}.
-#' @param seed Integer. Random seed for reproducibility when \code{method =
-#'   "knn"}. Default \code{42}.
+#' @param seed Optional integer seed for reproducible results. Only consulted
+#'   when \code{method = "knn"}. When \code{NULL} (the default) no seed is set
+#'   and the caller's random-number state is left untouched; supply an integer
+#'   to run the imputation under \code{withr::with_seed()}. Either way the
+#'   caller's RNG stream is restored on exit. Note that KNN imputation is
+#'   reproducible regardless of this argument, because
+#'   \code{impute::impute.knn()} seeds its own generator internally via its
+#'   \code{rng.seed} argument; \code{seed} controls only the RNG context this
+#'   call runs in, and does not alter the imputed values.
 #' @return Imputed numeric matrix of the same dimensions as
 #'   \code{data_matrix}.
 #' @export
@@ -1156,7 +1163,7 @@ get_imputation_descriptions <- function() {
 impute_missing_values <- function(data_matrix,
                                   method = "half_min",
                                   k = 5L,
-                                  seed = 42L) {
+                                  seed = NULL) {
   method <- match.arg(method, get_imputation_methods())
   if (!is.matrix(data_matrix) && !is.data.frame(data_matrix)) {
     stop("`data_matrix` must be a matrix or data.frame, not ", class(data_matrix)[1], ".")
@@ -1215,28 +1222,21 @@ impute_missing_values <- function(data_matrix,
         )
         return(impute_missing_values(data_matrix, method = "half_min"))
       }
-      # Set the seed for reproducible KNN imputation without permanently
-      # disturbing the caller's global RNG stream once this call returns.
-      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv)) {
-        get(".Random.seed", envir = .GlobalEnv)
-      } else {
-        NULL
-      }
-      on.exit(
-        {
-          if (is.null(old_seed)) {
-            if (exists(".Random.seed", envir = .GlobalEnv)) rm(".Random.seed", envir = .GlobalEnv)
-          } else {
-            assign(".Random.seed", old_seed, envir = .GlobalEnv)
-          }
-        },
-        add = TRUE
-      )
-      set.seed(seed)
-
       # impute::impute.knn expects features as rows, samples as columns
-      imp <- impute::impute.knn(t(data_matrix), k = k)
-      t(imp$data)
+      run_knn <- function() {
+        imp <- impute::impute.knn(t(data_matrix), k = k)
+        t(imp$data)
+      }
+      # impute.knn() seeds its own generator (its `rng.seed` argument, default
+      # 362436069) and would otherwise leave the caller's stream parked at the
+      # resulting position. Both branches therefore confine that disturbance to
+      # this call: `seed = NULL` preserves the caller's state without setting a
+      # seed, a supplied seed is scoped by withr and restored on exit.
+      if (is.null(seed)) {
+        withr::with_preserve_seed(run_knn())
+      } else {
+        withr::with_seed(seed, run_knn())
+      }
     }
   )
 

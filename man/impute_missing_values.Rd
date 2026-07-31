@@ -4,7 +4,7 @@
 \alias{impute_missing_values}
 \title{Impute Missing Values in a Lipidomics Data Matrix}
 \usage{
-impute_missing_values(data_matrix, method = "half_min", k = 5L, seed = 42L)
+impute_missing_values(data_matrix, method = "half_min", k = 5L, seed = NULL)
 }
 \arguments{
 \item{data_matrix}{Numeric matrix with samples as rows and lipids as
@@ -17,8 +17,15 @@ columns.}
 \item{k}{Integer. Number of nearest neighbours for \code{"knn"}
 (ignored for other methods). Default \code{5}.}
 
-\item{seed}{Integer. Random seed for reproducibility when \code{method =
-"knn"}. Default \code{42}.}
+\item{seed}{Optional integer seed for reproducible results. Only consulted
+when \code{method = "knn"}. When \code{NULL} (the default) no seed is set
+and the caller's random-number state is left untouched; supply an integer
+to run the imputation under \code{withr::with_seed()}. Either way the
+caller's RNG stream is restored on exit. Note that KNN imputation is
+reproducible regardless of this argument, because
+\code{impute::impute.knn()} seeds its own generator internally via its
+\code{rng.seed} argument; \code{seed} controls only the RNG context this
+call runs in, and does not alter the imputed values.}
 }
 \value{
 Imputed numeric matrix of the same dimensions as

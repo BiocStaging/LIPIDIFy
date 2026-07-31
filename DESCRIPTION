@@ -1,11 +1,13 @@
 Package: LIPIDIFy
 Type: Package
 Title: Comprehensive Lipidomics Data Analysis with Interactive Visualization
-Version: 0.99.3
+Version: 0.99.4
 Authors@R: c(
-    person("Fayrouz", "Hammal", email = "fayrouz.hammal@petermac.org", 
+    person("Fayrouz", "Hammal", email = "fayrouz.hammal@petermac.org",
            role = c("aut", "cre"),
-           comment = c(ORCID = "0000-0002-7612-4953"))
+           comment = c(ORCID = "0000-0002-7612-4953")),
+    person("Karen", "Sheppard", role = "fnd",
+           comment = "NHMRC of Australia grant #2020050")
     )
 Description: Provides a comprehensive toolkit for end-to-end lipidomics data
     analysis, including missing value imputation, batch effect correction,
@@ -41,6 +43,7 @@ Imports:
     openxlsx,
     rmarkdown,
     stringr,
+    withr,
     utils,
     stats,
     grDevices

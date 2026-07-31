@@ -169,6 +169,38 @@ testthat::test_that("impute_missing_values knn seed does not leak into global RN
   testthat::expect_equal(before, after)
 })
 
+testthat::test_that("impute_missing_values knn is reproducible for a supplied seed", {
+  testthat::skip_if_not_installed("impute")
+  m <- make_matrix()
+  m[1, 1] <- NA
+
+  a <- impute_missing_values(m, method = "knn", seed = 7L)
+  b <- impute_missing_values(m, method = "knn", seed = 7L)
+
+  testthat::expect_equal(a, b)
+})
+
+testthat::test_that("impute_missing_values knn with seed = NULL preserves global RNG state", {
+  testthat::skip_if_not_installed("impute")
+  m <- make_matrix()
+  m[1, 1] <- NA
+
+  # impute.knn() seeds its own generator, so the default path must still hand
+  # the caller's stream back exactly as it found it.
+  set.seed(321)
+  before <- runif(1)
+
+  set.seed(321)
+  invisible(impute_missing_values(m, method = "knn", seed = NULL))
+  after <- runif(1)
+
+  testthat::expect_equal(before, after)
+
+  res <- impute_missing_values(m, method = "knn", seed = NULL)
+  testthat::expect_equal(dim(res), dim(m))
+  testthat::expect_false(anyNA(res))
+})
+
 # 6. batch effect correction -------------------------------------------------
 testthat::test_that("correct_batch_effects (limma) preserves dimensions and reports method_used", {
   d <- load_lipidomics_data_from_df(generate_example_data())
