@@ -1,3 +1,13 @@
+# LIPIDIFy 0.99.5
+
+## Documentation
+- Removed `inst/CITATION`. The package has no associated publication or
+  preprint, and Bioconductor asks that a `CITATION` file be shipped only when
+  one exists. `citation("LIPIDIFy")` now returns the entry R generates
+  automatically from `DESCRIPTION`, which stays in step with the package
+  version and title. This clears the remaining BiocCheck warning about a
+  missing `doi` argument in `bibentry()`.
+
 # LIPIDIFy 0.99.4
 
 ## New features

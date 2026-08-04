@@ -1,7 +1,7 @@
 Package: LIPIDIFy
 Type: Package
 Title: Comprehensive Lipidomics Data Analysis with Interactive Visualization
-Version: 0.99.4
+Version: 0.99.5
 Authors@R: c(
     person("Fayrouz", "Hammal", email = "fayrouz.hammal@petermac.org",
            role = c("aut", "cre"),
