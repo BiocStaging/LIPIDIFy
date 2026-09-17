@@ -1317,13 +1317,16 @@ correct_batch_effects <- function(data_matrix,
     groups <- factor(make.names(as.character(metadata[[group_column]])))
     design_raw <- stats::model.matrix(~groups)
 
-    # Check rank: combine batch indicator columns with the group design and
-    # test whether the full matrix is full-rank.
-    batch_dummy <- stats::model.matrix(~ batch - 1)
+    # Check rank: combine the batch contrasts with the group design and test
+    # whether the full matrix is full-rank. The batch columns are
+    # treatment-coded (first level dropped): a full set of batch indicators
+    # always sums to design_raw's intercept column, which would make the
+    # combined matrix rank-deficient for every design, balanced or not.
+    batch_dummy <- stats::model.matrix(~batch)[, -1, drop = FALSE]
     combined <- cbind(design_raw, batch_dummy)
     if (qr(combined)$rank < ncol(combined)) {
       warning(
-        "The group column ('", group_column, "') is perfectly confounded with ",
+        "The group column ('", group_column, "') is confounded with ",
         "the batch column ('", batch_column, "'). ",
         "Proceeding without group protection -- all between-group variance may ",
         "be removed. Consider a design where batches contain samples from ",

@@ -215,6 +215,58 @@ testthat::test_that("correct_batch_effects (limma) preserves dimensions and repo
   testthat::expect_equal(attr(corrected, "method_used"), "limma")
 })
 
+testthat::test_that("correct_batch_effects protects groups when batch and group are not confounded", {
+  withr::local_seed(42)
+  groups <- rep(c("Ctrl", "Treat"), each = 8)
+  batch <- rep(c("B1", "B2"), times = 8) # every batch holds both groups
+  md <- data.frame(
+    `Sample Name` = paste0("S", 1:16), `Sample Group` = groups,
+    Batch = batch, check.names = FALSE
+  )
+  m <- matrix(stats::rnorm(16 * 50, sd = 0.2), nrow = 16,
+    dimnames = list(md$`Sample Name`, paste0("PC ", 1:50, ":0"))
+  )
+  m <- m + ifelse(groups == "Treat", 2, 0) + ifelse(batch == "B2", 5, 0)
+
+  # a balanced design must not trigger the confounding fallback
+  testthat::expect_no_warning(
+    corrected <- correct_batch_effects(m, md, batch_column = "Batch", method = "limma")
+  )
+
+  # the batch shift is removed ...
+  batch_gap <- mean(corrected[batch == "B2", ]) - mean(corrected[batch == "B1", ])
+  testthat::expect_lt(abs(batch_gap), 0.1)
+  # ... while the group difference is kept
+  group_gap <- mean(corrected[groups == "Treat", ]) - mean(corrected[groups == "Ctrl", ])
+  testthat::expect_equal(group_gap, 2, tolerance = 0.05)
+
+  # and the result is exactly limma's, with the group design passed through
+  expected <- t(limma::removeBatchEffect(t(m),
+    batch = factor(batch),
+    design = stats::model.matrix(~ factor(groups))
+  ))
+  testthat::expect_equal(corrected, expected, ignore_attr = TRUE)
+})
+
+testthat::test_that("correct_batch_effects warns and drops group protection when batch and group are confounded", {
+  withr::local_seed(43)
+  groups <- rep(c("A", "B", "C", "D"), each = 4)
+  batch <- rep(c("B1", "B2"), each = 8) # groups A, B only in B1; C, D only in B2
+  md <- data.frame(
+    `Sample Name` = paste0("S", 1:16), `Sample Group` = groups,
+    Batch = batch, check.names = FALSE
+  )
+  m <- matrix(stats::rnorm(16 * 50), nrow = 16,
+    dimnames = list(md$`Sample Name`, paste0("PC ", 1:50, ":0"))
+  )
+  testthat::expect_warning(
+    corrected <- correct_batch_effects(m, md, batch_column = "Batch", method = "limma"),
+    "confounded"
+  )
+  expected <- t(limma::removeBatchEffect(t(m), batch = factor(batch)))
+  testthat::expect_equal(corrected, expected, ignore_attr = TRUE)
+})
+
 testthat::test_that("correct_batch_effects falls back from combat to limma when sva is unavailable", {
   testthat::skip_if(requireNamespace("sva", quietly = TRUE), "sva is installed; fallback path not triggered")
   d <- load_lipidomics_data_from_df(generate_example_data())

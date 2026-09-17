@@ -114,9 +114,7 @@ licensed CC BY 4.0). It profiles HepG2 hepatocellular carcinoma cells by
 LC-MS (reversed phase, positive ion mode) under two conditions: untreated
 controls and cells treated with an SDC (syndecan) inhibitor, 3 replicates
 each. The processed data matrix is bundled with the package at
-`inst/extdata/ST001359_lipidomics.csv`; see
-`data-raw/prepare_ST001359_lipidomics.R` for exactly how it was derived from
-the public API.
+`inst/extdata/ST001359_lipidomics.csv`.
 
 ```{r load-data}
 file_path <- system.file("extdata", "ST001359_lipidomics.csv", package = "LIPIDIFy")

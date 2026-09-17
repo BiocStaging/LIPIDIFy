@@ -3,8 +3,8 @@
 # Data: Metabolomics Workbench Study ST001359, "Monophasic lipidomics
 # extraction in cancer cell lines" (Rodriguez Blanco G., Beatson Institute
 # for Cancer Research; CC BY 4.0). HepG2 cells, Control vs. SDC-inhibitor
-# treatment, 3 replicates each. See inst/extdata/ST001359_lipidomics.csv
-# and data-raw/prepare_ST001359_lipidomics.R for provenance details.
+# treatment, 3 replicates each. The data matrix is bundled with the package
+# at inst/extdata/ST001359_lipidomics.csv.
 #
 # Run with: Rscript system.file("scripts", "demo_lipidomics.R", package = "LIPIDIFy")
 

@@ -1,3 +1,7 @@
+# Metadata (non-lipid) columns of generate_example_data(); also the default
+# selection of the upload tab's "Metadata Columns" checkboxes.
+.example_metadata_cols <- c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)")
+
 # Helper: truncate a string to n characters (for Excel sheet names, max 31)
 .truncate_sheet_name <- function(x, n = 31) {
   x_clean <- gsub("[^A-Za-z0-9_.-]", "_", x)
@@ -203,7 +207,7 @@ launch_lipidomics_app <- function(port = NULL) {
 
     .register_select_all_observers(
       session, input, "metadata_cols",
-      function() c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)")
+      function() .example_metadata_cols
     )
     .register_select_all_observers(
       session, input, "norm_methods_1",
@@ -754,8 +758,8 @@ Methods are applied left-to-right in the order you select them.
         shiny::fileInput("file", "Choose CSV File", accept = ".csv"),
         .checkbox_group_with_buttons(
           "metadata_cols", "Metadata Columns:",
-          choices = c("Sample Name", "Sample Group", "Tumour ID", "Weight (mg)"),
-          selected = c("Sample Name", "Sample Group")
+          choices = .example_metadata_cols,
+          selected = .example_metadata_cols
         ),
         shiny::actionButton("load_data", "Load Data", class = "btn-primary"),
         shiny::br(), shiny::br(),
@@ -1622,9 +1626,14 @@ Methods are applied left-to-right in the order you select them.
     tryCatch(
       {
         example_data <- generate_example_data()
+        # The example data's metadata columns are known in advance, so they
+        # are always passed explicitly rather than taken from the upload
+        # tab's "Metadata Columns" checkboxes. Otherwise any unticked numeric
+        # metadata column (e.g. "Tumour ID", "Weight (mg)") would be treated
+        # as a lipid feature and offered in the lipid selectors.
         values$raw_data <- load_lipidomics_data_from_df(
           example_data,
-          input$metadata_cols
+          .example_metadata_cols
         )
 
         if (!is.null(values$raw_data$metadata$`Sample Name`)) {
@@ -3883,11 +3892,17 @@ Methods are applied left-to-right in the order you select them.
   }
 
   # ---- 6. Session info ---------------------------------------------------
+  # sessionInfo() is evaluated when the report is rendered, inside the running
+  # app's R session, so it records the exact R, LIPIDIFy and dependency
+  # versions that produced the results above.
   content <- paste0(
     content,
     "\n---\n\n# Session Information\n\n",
     "- **Report generated:** ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n",
-    "- **R version:** ", R.version.string, "\n\n"
+    "- **R version:** ", R.version.string, "\n\n",
+    "```{r session-info, echo=FALSE, comment=\"\"}\n",
+    "sessionInfo()\n",
+    "```\n"
   )
 
   paste0(yaml, setup, content)
